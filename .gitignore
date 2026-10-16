@@ -1,0 +1,17 @@
+# Built from your own copy of Project Zomboid and from OpenStreetMap downloads on first run.
+# Never publish these: they hold data derived from the game's files and the places you generated.
+cache/
+
+# Generated map mods (contain imported vanilla map cells) and quick test builds
+output/
+
+# Local working files
+bak_layout/
+study/
+*.tmp
+preview*.png
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude/
