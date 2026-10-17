@@ -323,6 +323,9 @@ def make(args):
     nf = terrain.place_fuel(md, g, feats, rng)
     if nf:
         print('fuel pumps:', nf)
+    nfield = terrain.fence_fields(g)                  # chain-link round big open fields
+    if nfield:
+        print('open fields fenced:', nfield)
     terrain.decorate(md, g, rng, keep_clear={(sx + dx, sy + dy) for sx, sy in spawns
                                              for dx in (-1, 0, 1) for dy in (-1, 0, 1)})
     weathering.weather(md, g, args.seed)               # grime on walls and floors, as vanilla's

@@ -515,6 +515,46 @@ SKIP_BARRIERS = {'bollard', 'gate', 'entrance', 'kerb', 'cycle_barrier', 'block'
                  'chain', 'jersey_barrier', 'cattle_grid', 'toll_booth', 'stile', 'turnstile', 'height_restrictor'}
 
 
+def fence_fields(g, min_area=2500, gate_every=40, gate=3):
+    """Chain-link round every big open field (wild grass, dirt or sand of 2500+ squares: not a lawn, a park,
+    a wood, a car park or a road), one square in from its edge so both sides of the fence are open ground,
+    with a gate-width gap every 40 squares along each side. Added to g.barriers. -> fields fenced"""
+    open_ = ((g.B == 0) & ~g.street & np.isin(g.G, [T_GRASS, T_DIRT, T_SAND])
+             & np.isin(g.V, [0, V_SCRUB]) & (getattr(g, 'PK', np.zeros_like(g.B)) == 0))
+    lab, n = ndi.label(open_)
+    if not n:
+        return 0
+    sizes = np.bincount(lab.ravel())
+    done = 0
+    tags = {'barrier': 'fence', 'fence_type': 'chain_link'}
+    for f in range(1, n + 1):
+        if sizes[f] < min_area:
+            continue
+        inner = ndi.binary_erosion(lab == f)
+        if inner.sum() < min_area // 2:
+            continue
+        H, W = inner.shape
+        up = np.zeros_like(inner); up[1:, :] = inner[:-1, :]
+        lf = np.zeros_like(inner); lf[:, 1:] = inner[:, :-1]
+        dn = np.zeros_like(inner); dn[:-1, :] = inner[1:, :]
+        rt = np.zeros_like(inner); rt[:, :-1] = inner[:, 1:]
+        gap = lambda v: (v % gate_every) < gate
+        for y, x in np.argwhere(inner & ~up):            # north edge of the field's inner squares
+            if not gap(int(x)):
+                g.barriers.append(('fence', [(float(x), float(y)), (float(x + 1), float(y))], tags))
+        for y, x in np.argwhere(inner & ~dn):            # south edge
+            if not gap(int(x)):
+                g.barriers.append(('fence', [(float(x), float(y + 1)), (float(x + 1), float(y + 1))], tags))
+        for y, x in np.argwhere(inner & ~lf):            # west edge
+            if not gap(int(y)):
+                g.barriers.append(('fence', [(float(x), float(y)), (float(x), float(y + 1))], tags))
+        for y, x in np.argwhere(inner & ~rt):            # east edge
+            if not gap(int(y)):
+                g.barriers.append(('fence', [(float(x + 1), float(y)), (float(x + 1), float(y + 1))], tags))
+        done += 1
+    return done
+
+
 def _place_fences(md, g, blocked, rng):
     """Fences and walls stand on square edges (like building walls); hedges fill squares."""
     G, B = g.G, g.B
