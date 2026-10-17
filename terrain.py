@@ -956,6 +956,10 @@ def place_fuel(md, g, feats, rng):
             area = (xx - cx) ** 2 + (yy - cy) ** 2 <= 18 ** 2
         else:
             continue
+        fc = next((sq for ff, sq in getattr(g, 'forecourts', ()) if ff is f), None)
+        if fc is not None and len(fc[0]):                # the paved forecourt Ground laid for it
+            area = np.zeros((H, W), bool)
+            area[fc] = True
         ok = area & (g.B == 0) & ~g.street & np.isin(g.G, [T_PAVE, T_ASPHALT, T_CONCRETE, T_PLAZA])
         brand = rng.choice(sorted(PUMPS))
         facing = 'S' if rng.random() < 0.5 else 'E'

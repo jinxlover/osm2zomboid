@@ -146,8 +146,21 @@ and `audit.py` checks a generated map against them (see "Checking a map").
 * **What a building is.** Its own tags first. A business mapped in or just in front of a building takes the
   street unit at that spot (or the nearest free one), so a corner store mapped on a corner is a `cornerstore`
   on that corner. Over 90% of Austin's mapped businesses end up where they are mapped. Kinds without a vanilla
-  twin get the closest one: offices of any kind are `office`, venues are bars or theatres, fuel stations are a
-  `gasstore` with Gas 2 Go or Fossoil pump islands on the forecourt.
+  twin get the closest one: offices of any kind are `office`, venues are bars or theatres.
+* **Places mapped as areas** count too: every building standing in mapped school grounds is the school's, a shop or
+  restaurant drawn as its lot gives the building on it its use, and a business point up to 15 m from an outline
+  (on the car park in front) belongs to that building. A small building with a business mapped in it is that
+  business even when it looks like a house (many Austin restaurants are old houses). A big building with several
+  shops and restaurants is a strip of units on the street.
+* **Fuel stations**: the forecourt (the mapped station, its canopy, or the ground round a mapped point) is paved
+  and gets Gas 2 Go or Fossoil pump islands; the shop on it or beside it is vanilla's `gasstore` (gas station loot
+  and Gas 2 Go zombies), whatever it is tagged as.
+* **Schools** are laid out like vanilla's 22 schools: elementary, secondary or university (from the name, else
+  by size), each with its own classrooms and corridors; on the ground floor the biggest room is the gym with its
+  storage and locker rooms, a cafeteria by the way in with its kitchen beside it, a library, a nurse's room, labs
+  in secondary schools; offices only to vanilla's share (4%), and no warehouse of storage rooms.
+* **The places report**: every build prints how many mapped places became what they are, and lists every one in
+  `output/<name>.places.txt`, mismatches first.
 * **Untagged buildings** (most of OpenStreetMap outside downtowns is just `building=yes`) are read from where
   they stand: mapped land use and how built up the neighbourhood is. In a residential street a building is a
   house, a small one in a yard a shed or garage; on industrial land a warehouse; downtown a row of shops with

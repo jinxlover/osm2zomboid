@@ -120,9 +120,13 @@ def _stitch(ways):
 
 def load(js, proj):
     feats = []
+    seen = set()
     for el in js['elements']:
         t = el.get('tags', {}) or {}
         typ = el['type']
+        if (typ, el.get('id')) in seen:              # the same element from two queries (a fuel station's shop)
+            continue
+        seen.add((typ, el.get('id')))
         if typ == 'node':
             if 'lat' in el:
                 feats.append(Feature('node', t, pt=proj.xy(el['lat'], el['lon'])))

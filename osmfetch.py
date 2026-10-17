@@ -11,8 +11,11 @@ def queries(s,w,n,e):
      'barriers': hdr+f' way["barrier"]{b};'+ftr,
      'services': hdr+f' way["amenity"="fuel"]{b}; node["amenity"="fuel"]{b};'+ftr,
      'pois': hdr+f' node["natural"="tree"]{b}; node["highway"]{b}; node["amenity"]{b}; node["shop"]{b}; node["tourism"]{b}; node["office"]{b}; node["entrance"]{b};'+ftr,
+     # places mapped as an area rather than a point: school grounds, a shop or a restaurant drawn as its lot
+     'places': hdr+f' way["amenity"~"^({PLACE_AMENITY})$"]["building"!~"."]{b}; relation["amenity"~"^({PLACE_AMENITY})$"]["building"!~"."]{b}; way["shop"]["building"!~"."]{b}; way["tourism"~"^(hotel|motel|hostel|museum)$"]["building"!~"."]{b};'+ftr,
     }
-OPTIONAL={'services'}       # added later: an old cache without it still works offline
+PLACE_AMENITY='school|college|university|kindergarten|restaurant|fast_food|cafe|bar|pub|ice_cream|pharmacy|bank|clinic|doctors|dentist|hospital|library|place_of_worship|police|fire_station|post_office|cinema|theatre|community_centre|social_facility|marketplace|car_wash|nightclub'
+OPTIONAL={'services','places'}       # added later: an old cache without them still works offline
 def fetch(s,w,n,e,cache_dir):
     os.makedirs(cache_dir,exist_ok=True)
     key=hashlib.md5(f"{s},{w},{n},{e}".encode()).hexdigest()[:10]

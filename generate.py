@@ -7,7 +7,7 @@ Pipeline: download (osmfetch) -> project, turned so the street grid follows the 
 -> terrain classes and street objects (ground) -> ground tiles (terrain) -> buildings and furniture
 (buildings, furnish) -> road markings and street furniture (terrain) -> lot files (lotwriter).
 """
-import argparse, glob, os, random, re, shutil, sys, time
+import argparse, collections, glob, os, random, re, shutil, sys, time
 import numpy as np
 from scipy import ndimage as ndi
 
@@ -232,6 +232,68 @@ def check_site(cx0, cy0, cw, ch):
         print('site: outside the vanilla map')
 
 
+# ------------------------------------------------------------------------------------------ mapped places
+NOT_A_PLACE = {'bench', 'waste_basket', 'bicycle_parking', 'parking_entrance', 'atm', 'vending_machine', 'post_box',
+               'drinking_water', 'charging_station', 'recycling', 'fountain', 'toilets', 'parking', 'parking_space',
+               'shelter', 'telephone', 'clock', 'waste_disposal', 'public_bookcase', 'bbq', 'grit_bin', 'hunting_stand',
+               'loading_dock', 'motorcycle_parking', 'water_point', 'compressed_air', 'vacuum_cleaner'}
+SNAP = 15             # a point this far (squares = metres) from any building outline still belongs to the nearest
+FUEL_SHOP = 25        # the shop of a fuel station stands within this of its forecourt
+# what a mapped place may come out as and still be what it is (a restaurant in a strip of shops is a unit there)
+AS_UNIT = {'retail', 'office', 'hotel', 'apartments'}
+
+
+def _raster(rings, W, H):
+    """An area's outline as a bool array over its bounding box (clipped to the map) -> (mask, (y0, x0))."""
+    from PIL import Image, ImageDraw
+    xs = [p[0] for outer, _ in rings for p in outer]
+    ys = [p[1] for outer, _ in rings for p in outer]
+    x0, y0 = max(0, int(min(xs))), max(0, int(min(ys)))
+    x1, y1 = min(W, int(max(xs)) + 2), min(H, int(max(ys)) + 2)
+    if x1 <= x0 or y1 <= y0:
+        return None, (0, 0)
+    im = Image.new('L', (x1 - x0, y1 - y0), 0)
+    d = ImageDraw.Draw(im)
+    for outer, holes in rings:
+        d.polygon([(px - x0, py - y0) for px, py in outer], fill=1)
+        for hl in holes:
+            d.polygon([(px - x0, py - y0) for px, py in hl], fill=0)
+    m = np.array(im, bool)
+    return (m if m.any() else None), (y0, x0)
+
+
+def places_report(args, g, placed, infos):
+    """Every mapped school, fuel station, restaurant and shop, and what its building became: printed as a
+    summary, listed in full in output/<name>.places.txt (mismatches first)."""
+    from buildings import classify
+    rows = []
+    for t, b, how in placed:
+        want = 'gas' if t.get('amenity') == 'fuel' else classify({}, [t])[0]
+        if want == 'generic':
+            continue                                  # an office, a hairdresser with no vanilla twin: anything goes
+        got = infos.get(b, {}).get('use') if b else None
+        ok = got == want or (got in AS_UNIT and want in ('retail', 'restaurant', 'bar', 'cafe', 'bank', 'dentist',
+                                                         'clinic', 'post', 'studio', 'gym', 'office')) or             (got == 'gas' and want == 'retail') or (how == 'fuel station' and not b)   # pumps by a big store
+        what = t.get('amenity') or ('shop=' + t['shop'] if 'shop' in t else t.get('tourism') or '?')
+        rows.append((ok, what, want, got, how, t.get('name', '')))
+    for bid, feat in g.bfeat.items():                   # mapped on the building itself
+        t = feat.tags
+        if bid in infos and any(k in t for k in ('amenity', 'shop')) and t.get('amenity') not in NOT_A_PLACE:
+            want = 'gas' if t.get('amenity') == 'fuel' else classify(t, [])[0]
+            if want != 'generic':
+                got = infos[bid].get('use')
+                rows.append((got == want or (got == 'gas' and want == 'retail'), t.get('amenity') or 'shop=' + t.get('shop', ''), want, got, 'building', t.get('name', '')))
+    if not rows:
+        return
+    good = sum(1 for r in rows if r[0])
+    bad = collections.Counter((r[1], r[2], r[3]) for r in rows if not r[0])
+    print(f'mapped places: {len(rows)}, {good} became what they are' + (f'; not: {dict(bad.most_common(8))}' if bad else ''))
+    out = os.path.join(os.path.dirname(os.path.abspath(args.out or 'output/x')), (args.name or 'map') + '.places.txt')
+    with open(out, 'w', encoding='utf8') as fh:
+        for r in sorted(rows, key=lambda r: (r[0], r[1])):
+            fh.write('%s\t%s\t%s -> %s\t%s\t%s\n' % ('ok ' if r[0] else 'NOT', r[1], r[2], r[3], r[4], r[5]))
+
+
 # ------------------------------------------------------------------------------------------ the map
 def make(args):
     catalog.load(os.path.join(args.cache, 'catalog.json'))
@@ -256,7 +318,11 @@ def make(args):
     # ---- ground
     t0 = time.time()
     g = Ground(feats, proj, seed=args.seed, background=args.background)
-    nrow = split_rows(g)
+    busy = set()                                      # buildings with a business mapped inside: never homes
+    for f in feats:
+        if f.kind == 'node' and any(k in f.tags for k in ('amenity', 'shop', 'tourism', 'office')) and                 f.tags.get('amenity') not in NOT_A_PLACE and 0 <= f.pt[0] < W and 0 <= f.pt[1] < H:
+            busy.add(int(g.B[int(f.pt[1]), int(f.pt[0])]))
+    nrow = split_rows(g, busy=busy - {0})
     if nrow:
         print('big buildings among houses split into rows of homes: %d units' % nrow)
     md = lotwriter.MapData(W, H, cx0, cy0)
@@ -267,22 +333,62 @@ def make(args):
     # ---- buildings: the shops / amenities mapped inside each outline and the entrances on its walls
     t0 = time.time()
     pois, ents = {}, {}
+    placed = []                                       # (tags, building or 0, how it was mapped): for the report
     for f in feats:
         if f.kind == 'node' and any(k in f.tags for k in ('amenity', 'shop', 'tourism', 'office', 'leisure')):
             x, y = int(f.pt[0]), int(f.pt[1])
-            if not (0 <= x < W and 0 <= y < H):
+            if not (0 <= x < W and 0 <= y < H) or f.tags.get('amenity') in NOT_A_PLACE:
                 continue
             b = int(g.B[y, x])
-            if b == 0:                                # mapped on the pavement in front: the nearest building's
-                near = g.B[max(0, y - 4):y + 5, max(0, x - 4):x + 5]
+            if b == 0:                                # mapped on the pavement or the car park in front: the
+                r = SNAP                              # nearest building's, up to about 15 m away
+                near = g.B[max(0, y - r):y + r + 1, max(0, x - r):x + r + 1]
                 if (near > 0).any():
                     ys_, xs_ = np.nonzero(near)
-                    k = np.argmin((ys_ - min(y, 4)) ** 2 + (xs_ - min(x, 4)) ** 2)
+                    k = np.argmin((ys_ - min(y, r)) ** 2 + (xs_ - min(x, r)) ** 2)
                     b = int(near[ys_[k], xs_[k]])
-            if b and f.tags.get('amenity') not in ('bench', 'waste_basket', 'bicycle_parking', 'parking_entrance',
-                                                  'atm', 'vending_machine', 'post_box', 'drinking_water',
-                                                  'charging_station', 'recycling', 'fountain', 'toilets'):
+            if f.tags.get('amenity') == 'fuel':
+                continue                              # a fuel station goes to its shop, below
+            if b:
                 pois.setdefault(b, []).append((f.pt[0], f.pt[1], f.tags))
+            placed.append((f.tags, b, 'point'))
+    # places mapped as an area (school grounds, a shop's lot): the buildings standing in them are theirs
+    sizes_b = np.bincount(g.B.ravel())
+    for f in feats:
+        t = f.tags
+        if f.kind == 'node' or 'building' in t or not f.rings or t.get('amenity') == 'fuel' or \
+                not (t.get('amenity') in osmfetch.PLACE_AMENITY.split('|') or 'shop' in t or
+                     t.get('tourism') in ('hotel', 'motel', 'hostel', 'museum')):
+            continue
+        m, (y0, x0) = _raster(f.rings, W, H)
+        if m is None:
+            continue
+        ids, n = np.unique(g.B[y0:y0 + m.shape[0], x0:x0 + m.shape[1]][m], return_counts=True)
+        mine = [int(b) for b, c in zip(ids, n) if b and c >= 0.5 * sizes_b[b]]
+        for b in mine:
+            pois.setdefault(b, []).append((x0 + m.shape[1] / 2, y0 + m.shape[0] / 2, dict(t, _grounds='1')))
+        placed.append((t, mine[0] if len(mine) == 1 else (mine or [0])[0], 'area of %d buildings' % len(mine)))
+    # a fuel station: its forecourt is paved (Ground) and the shop on it, or the nearest one beside it, is
+    # vanilla's gas station shop
+    for f, (ys_, xs_) in g.forecourts:
+        if not len(ys_):
+            continue
+        y0, y1, x0, x1 = max(0, ys_.min() - FUEL_SHOP), ys_.max() + FUEL_SHOP + 1, max(0, xs_.min() - FUEL_SHOP), xs_.max() + FUEL_SHOP + 1
+        cy, cx = ys_.mean(), xs_.mean()
+        best = None
+        for b in np.unique(g.B[y0:y1, x0:x1]):
+            if not b or not (20 <= sizes_b[b] <= 700):
+                continue
+            by, bx = np.nonzero(g.B[y0:y1, x0:x1] == b)
+            d = np.min((by + y0 - cy) ** 2 + (bx + x0 - cx) ** 2) ** 0.5
+            shop = any(k in g.bfeat[int(b)].tags for k in ('shop', 'amenity')) if int(b) in g.bfeat else False
+            key = (not shop, d)
+            if best is None or key < best[0]:
+                best = (key, int(b))
+        b = best[1] if best else 0
+        if b:
+            pois.setdefault(b, []).append((cx, cy, {'amenity': 'fuel'}))
+        placed.append((f.tags, b, 'fuel station'))
     for (x, y, t) in g.entrances:
         xi, yi = int(x), int(y)
         near = g.B[max(0, yi - 3):yi + 4, max(0, xi - 3):xi + 4]
@@ -315,6 +421,7 @@ def make(args):
     bg.roof_rows()                                    # one roof over each row of homes
     bg.emit_walls()
     print(f'buildings {time.time() - t0:.1f} s: {len(infos)} built', dict(bg.stats))
+    places_report(args, g, placed, infos)
     print('furniture placed:', dict(sorted(bg.furnisher.count.items())))
     if bg.furnisher.stats_fallback:
         print('furnishing second tries:', dict(bg.furnisher.stats_fallback))
@@ -412,7 +519,7 @@ def _biggest_rect(m):
     return best[1]
 
 
-def split_rows(g, unit=9.0):
+def split_rows(g, unit=9.0, busy=()):
     """A big building among houses is a row of homes, not an apartment block: an untagged (or residential /
     terrace) outline of 320+ squares in a residential area is cut along its length into house-wide units
     (vanilla houses are about 8 x 12), front and back as well when it is deeper than 18. Each unit becomes
@@ -428,8 +535,8 @@ def split_rows(g, unit=9.0):
             continue
         t = f.tags
         if t.get('building') not in ROW_TAGS or any(k in t for k in ('shop', 'amenity', 'office', 'tourism', 'leisure',
-                                                                    'name', 'building:levels')):
-            continue
+                                                                    'name', 'building:levels')) or bid in busy:
+            continue                                     # (busy: a business is mapped inside: not homes)
         try:
             tall = float(str(t.get('height', '0')).split()[0])
         except ValueError:

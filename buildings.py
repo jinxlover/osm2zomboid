@@ -86,6 +86,29 @@ PROGRAMME = {
     'community': ('recreation', ['office', 'storage'], True),
     'market': ('grocery', ['grocerystorage', 'producestorage'], False),
 }
+# vanilla's 22 schools come in three kinds, each with its own classrooms and corridors (and loot)
+SCHOOL_KIND = {'elementary': ('elementaryclassroom', 'elementaryhall'),
+               'secondary': ('secondaryclassroom', 'secondaryhall'),
+               'university': ('universityclassroom', 'hall')}
+
+
+def school_kind(tag_list, area):
+    """Elementary, secondary or university from the school's name and tags; by size when they say nothing
+    (vanilla's elementary schools are the small ones)."""
+    text = ' '.join(str(t.get(k, '')) for t in tag_list
+                    for k in ('name', 'amenity', 'building', 'school', 'grades', 'isced:level')).lower()
+    if any(w in text for w in ('university', 'college', 'institute', 'campus', 'seminary')):
+        return 'university'
+    if any(w in text for w in ('elementary', 'primary', 'kindergarten', 'preschool', 'pre-k', 'montessori',
+                               'early', 'child', 'daycare')):
+        return 'elementary'
+    if any(w in text for w in ('high', 'middle', 'secondary', 'junior', 'academy', 'prep')):
+        return 'secondary'
+    return 'elementary' if area < 3000 else 'secondary'
+
+
+# a mapped place that is the whole of a big building, never one tenant in it
+INSTITUTION = {'school', 'church', 'clinic', 'library', 'police', 'theatre', 'museum', 'community', 'civic'}
 AMENITY_USE = {'fuel': 'gas', 'community_centre': 'community', 'social_facility': 'community',
                'marketplace': 'market', 'events_venue': 'theatre', 'arts_centre': 'museum', 'courthouse': 'civic',
                'townhall': 'civic', 'fire_station': 'civic', 'bank': 'bank', 'clinic': 'clinic', 'doctors': 'clinic', 'hospital': 'clinic', 'dentist': 'dentist',
@@ -220,6 +243,8 @@ def classify(tags, pois):
                              ('burgerdining', 'burgerkitchen') if 'fast_food' in am and 'restaurant' not in am
                              else ('restaurantdining', 'restaurantkitchen'))
         back = [kitchen, 'storage']
+    elif 'fuel' in am:
+        use = 'gas'                                   # a fuel station's shop sells what vanilla's gas stations do
     elif 'cafe' in am or 'ice_cream' in am:
         use = 'cafe'
         if 'ice_cream' in am or 'ice_cream' in cuisine:
@@ -381,19 +406,47 @@ class BuildingGen:
         poi_tags = [t for (_, _, t) in pois]
         tenants = []
         for (px, py, t) in pois:
+            if t.get('_grounds'):
+                continue                             # the grounds the building stands in are not a tenant
             u, pr = classify({}, [t])
             if pr:
                 tenants.append((TENANT_RANK.get(u, 9), px, py, u, pr))
         use, prog = classify(tags, [])
         if use == 'generic' and any(t.get('tourism') in ('hotel', 'hostel', 'motel') for t in poi_tags):
             use, prog = 'hotel', None                # a mapped hotel makes the whole building one
+        if use in ('house', 'apartments') and area <= 700 and not any(k in tags for k in ('amenity', 'shop')):
+            # a restaurant, a shop, a clinic mapped in a house-shaped building is that business (in Austin many
+            # are old houses)
+            u, pr = classify({}, [t for t in poi_tags if not t.get('_grounds')])
+            if u in SHOPFRONT or u in INSTITUTION or u in ('gas', 'bank', 'post', 'clinic', 'dentist'):
+                use, prog = u, pr
+                self.stats['houses that are a mapped business'] += 1
+        grounds = [t for t in poi_tags if t.get('_grounds')]
+        if use == 'generic' and grounds and area >= 30:
+            # standing in mapped school grounds (a church's, a shop's lot): the building is theirs, whatever its size
+            u, pr = classify({}, grounds)
+            if u != 'generic':
+                use, prog = u, pr
+                self.stats["buildings given their grounds' use"] += 1
         if use == 'generic' and pois:
             if area <= 700:
                 use, prog = classify(tags, poi_tags)
             elif any(t.get('tourism') in ('hotel', 'hostel', 'motel') for t in poi_tags):
                 use = 'hotel'
             else:
-                use = 'office'
+                # one institution is the whole building (a school, a church, a clinic); shops and restaurants
+                # in a big one are a strip of units on the street; anything else is offices with tenants
+                one = classify({}, poi_tags)[0]
+                if one in INSTITUTION:
+                    use, prog = classify({}, poi_tags)
+                elif any(tn[3] in SHOPFRONT for tn in tenants):
+                    use, prog = classify({'shop': 'yes'}, [])
+                    self.stats['strips of shops'] += 1
+                else:
+                    use = 'office'
+        if any(t.get('amenity') == 'fuel' for t in poi_tags) and use in ('generic', 'retail') and area <= 700:
+            use, prog = 'gas', PROGRAMME['gas']      # the shop of a fuel station: vanilla's gas station shop
+            self.stats['fuel station shops'] += 1
         # what an untagged building is depends on where it stands: houses in a residential street, sheds and
         # garages in the yards, warehouses on industrial land, shops and offices downtown
         cy_, cx_ = [int(v.mean()) for v in np.nonzero(mask)]
@@ -441,6 +494,11 @@ class BuildingGen:
             if prog is None and use in PROGRAMME:
                 prog = PROGRAMME[use]
             levels = self._levels(tags, use, area) if 'building:levels' not in tags and 'height' not in tags else levels
+        if use == 'school':
+            school = school_kind([tags] + poi_tags, area)
+            ck = SCHOOL_KIND[school][0]
+            prog = (ck, [ck, ck, 'office'], True)
+            self.stats['school: ' + school] += 1
         self.stats[use] += 1
         if use == 'house' and 'building:levels' not in tags:
             levels = self._levels(tags, 'house', area)   # (an untagged building read as a house)
@@ -572,6 +630,8 @@ class BuildingGen:
                          {d[3] for d in doors}, opens[0])
         if levels > 1:
             self._right_size(lab1, names[1:], int_doors[1], {sr} | set(halls), set(), opens[1])
+        if use == 'school':
+            self._school_rooms(labs, names, levels, doors, school, keep_halls=bool(elev))
         # --- walls, roof, floors
         for z in range(levels):
             self._place_walls(z, ox, oy, mask, labs[z], names[z], ext, free, party, doors, int_doors[z], opens[z],
@@ -616,6 +676,98 @@ class BuildingGen:
         return dict(use=use, levels=levels, tall=self._true_levels(tags) or levels, rooms=int(lab0.max()), lab=lab0,
                     labs=labs, int_doors=int_doors, opens=opens, names=names, doors=doors, stairs=stairs, ox=ox, oy=oy,
                     name=tags.get('name'))
+
+    def _school_rooms(self, labs, names, levels, doors, kind, keep_halls=False):
+        """A school with the rooms of vanilla's 22 schools: classrooms of the school's kind off its corridors; on
+        the ground floor a gym (the biggest room) with its storage and locker rooms, a cafeteria (by a street
+        door) with its kitchen beside it, a library, a nurse's room, a lab in a secondary school; staff offices
+        only as many as vanilla's (4% of a school), a store room or two a floor, and no warehouse of storage
+        rooms (vanilla schools have almost none: the rest are classrooms)."""
+        ck, hk = SCHOOL_KIND[kind]
+        nm0 = names[0]
+        lab0 = labs[0]
+        counts = np.bincount(lab0.ravel())
+        size = {r: int(counts[r]) for r in nm0 if r < len(counts) and counts[r]}
+        adj = defaultdict(set)
+        for (a_, b_) in self._shared_walls(lab0):
+            adj[a_].add(b_)
+            adj[b_].add(a_)
+        street = {int(lab0[d[3][1], d[3][0]]) for d in doors}      # rooms with a door to the street
+        total = sum(size.values())
+        free = lambda r: r in size and nm0.get(r) in (ck, 'classroom', 'storage', 'officestorage', 'office')
+
+        def take(r, new):
+            nm0[r] = new
+            self.stats['school rooms: ' + new] += 1
+
+        if total >= 1500:                              # the gym, and beside it its storage and locker rooms
+            big = [r for r in size if free(r) and size[r] >= 150]
+            if big:
+                gym = max(big, key=lambda r: size[r])
+                take(gym, 'gym')
+                small = sorted((r for r in adj[gym] if free(r) and size[r] <= 60), key=lambda r: size[r])
+                for r, new in zip(small, ('schoolgymstorage', 'lockerroom', 'lockerroom')):
+                    take(r, new)
+        if total >= 1000:                              # the cafeteria by the way in, its kitchen beside it
+            big = [r for r in size if free(r) and size[r] >= 100]
+            if big:
+                caf = max(big, key=lambda r: (r in street, -abs(size[r] - 314)))
+                take(caf, 'cafeteria')
+                kit = [r for r in adj[caf] if free(r) and 25 <= size[r] <= 150]
+                if kit:
+                    take(min(kit, key=lambda r: abs(size[r] - 71)), 'cafeteriakitchen')
+        if total >= 1200:
+            mid = [r for r in size if free(r) and 80 <= size[r] <= 300]
+            if mid:
+                take(min(mid, key=lambda r: abs(size[r] - 168)), 'universitylibrary' if kind == 'university' else 'library')
+        nurse = [r for r in size if free(r) and 12 <= size[r] <= 45]
+        if nurse and total >= 600:
+            take(min(nurse, key=lambda r: abs(size[r] - 25)), 'medical')
+        if kind != 'elementary':
+            labs_ = sorted((r for r in size if free(r) and 60 <= size[r] <= 160), key=lambda r: abs(size[r] - 108))
+            for r in labs_[:max(1, total // 3000)]:
+                take(r, 'schoollab')
+        # every floor: classrooms and corridors of the kind, offices to vanilla's share, a store room or two
+        whole = sum(int((l > 0).sum()) for l in labs)
+        budget = max(2, int(0.04 * whole / 38))
+        offices = 0
+        seen = set()
+        for z in range(levels):
+            nm = names[z]
+            if id(nm) in seen:
+                continue
+            seen.add(id(nm))
+            share = sum(1 for zz in range(levels) if names[zz] is nm)      # upper floors share one plan
+            cz = np.bincount(labs[z].ravel())
+            sz = lambda r: int(cz[r]) if r < len(cz) else 0
+            stores = 0
+            for r in sorted(nm, key=sz):
+                v = nm[r]
+                if v == 'classroom':
+                    nm[r] = ck
+                elif v == 'hall' and hk != 'hall' and not keep_halls:
+                    nm[r] = hk
+                elif v in ('storage', 'officestorage'):
+                    if sz(r) <= 30 and stores < 2:
+                        nm[r] = 'schoolstorage'
+                        stores += 1
+                    elif sz(r) <= 30:
+                        nm[r] = 'janitor' if sz(r) <= 16 else 'schoolstorage'
+                    elif sz(r) < 50:
+                        nm[r] = 'schoolstorage'
+                    else:
+                        nm[r] = ck
+                        self.stats['school store rooms made classrooms'] += 1
+                elif v == 'office':
+                    offices += share
+                    if offices > budget and sz(r) >= 50:
+                        nm[r] = ck
+                        self.stats['school offices made classrooms'] += 1
+                if nm[r] == ck and sz(r) < 50:
+                    # too small for desks and benches (a vanilla classroom is 130 squares and more): what a small
+                    # room in a vanilla school is, a staff office or a store room
+                    nm[r] = ('universityoffice' if kind == 'university' else 'office') if sz(r) >= 25 else 'schoolstorage'
+                    self.stats['school rooms too small for a class'] += 1
 
     # ------------------------------------------------------------------ ground floor
     @staticmethod
@@ -898,6 +1050,16 @@ class BuildingGen:
             if es:
                 int0.add(es[len(es) // 2])
 
+        def any_door():
+            """No door on the main room's street wall (it has none): one on the outside wall nearest a road,
+            whichever room it belongs to, so nobody is shut in."""
+            rs = [r for r in outer if outer[r]]
+            if not rs:
+                return []
+            r = min(rs, key=lambda r: min(odist(e) for e in outer[r]))
+            self.stats['doors put where the room allows'] += 1
+            return [self._door_edge(street_wall(r), entrances, ox, oy)]
+
         names = {}
         by_front = sorted(fronts, key=lambda u: -len(street_wall(u)))
         # ---- buildings that are one thing throughout
@@ -906,6 +1068,8 @@ class BuildingGen:
             if use == 'house':
                 names, hdoors, self._open0 = self._house_plan(sizes, shared, main, levels)
                 doors = [self._door_edge(street_wall(main), entrances, ox, oy)] if street_wall(main) else []
+                if not doors:                            # wedged into a row: the door goes where it can
+                    doors = any_door()
                 kit = next((r for r, v in names.items() if v == 'kitchen'), None)
                 es = [e for e in outer.get(kit, []) if fdist(e) > FRONT_DIST] if kit else []
                 if len(es) >= 2 and rng.random() < 0.7:           # the kitchen door to the yard
@@ -926,7 +1090,7 @@ class BuildingGen:
                 reached.add(best[0])
                 int0.add(best[1][len(best[1]) // 2])
             doors = [self._door_edge(street_wall(u), entrances, ox, oy)
-                     for u in by_front[:1 if use == 'house' else 3] if street_wall(u)]
+                     for u in by_front[:1 if use == 'house' else 3] if street_wall(u)] or any_door()
             return names, doors, int0, sorted(sizes, key=lambda r: r != main), set()
         # ---- who is in each unit: mapped businesses first
         unit = {}

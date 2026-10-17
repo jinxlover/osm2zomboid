@@ -115,6 +115,16 @@ class Ground:
         self._bld = Image.new('I', size, 0)
         self._buildings()
         self.B = np.array(self._bld, dtype=np.int32)
+        # an outline drawn at an angle can leave single squares inside it unfilled (a hole in the floor plan):
+        # a gap with the same building on both sides is that building's
+        B = self.B
+        for _ in range(2):
+            gap = B[:, 1:-1] == 0
+            same = (B[:, :-2] == B[:, 2:]) & (B[:, :-2] > 0) & gap
+            B[:, 1:-1][same] = B[:, :-2][same]
+            gap = B[1:-1, :] == 0
+            same = (B[:-2, :] == B[2:, :]) & (B[:-2, :] > 0) & gap
+            B[1:-1, :][same] = B[:-2, :][same]
         # how built up the neighbourhood is (share of a 60 m square covered by buildings: a downtown block
         # is 0.4 and more, a street of houses 0.1 to 0.2) and the mapped land use, for untagged buildings
         self.coverage = ndi.uniform_filter((self.B > 0).astype(np.float32), size=61, mode='nearest')
@@ -133,8 +143,45 @@ class Ground:
         self.PK = ndi.label(pk)[0]
         self.G[self.PK > 0] = T_ASPHALT                      # one surface per lot, not a patchwork of polygons
         self.V[(self.B > 0) | self.street] = V_NONE
+        self.forecourts = self._forecourts()
         self.asph = self.street           # old name, kept for callers that measure distance to the road
         self._points()
+
+    def _forecourts(self):
+        """A fuel station's forecourt is paved, mapped as such or not (left to the background it would be lawn
+        and get no pumps): the station's own area (a canopy is one) or, for a point or a station mapped as its
+        shop building, the ground round it. -> [(feature, (ys, xs) of the forecourt)]"""
+        out = []
+        H, W = self.G.shape
+        soft = np.isin(self.G, [T_GRASS, T_LAWN, T_DIRT, T_SAND, T_GRAVEL])
+        for f in self.feats:
+            if f.tags.get('amenity') != 'fuel':
+                continue
+            if f.rings and f.tags.get('building') in (None, 'roof', 'canopy', 'carport'):
+                xs = [p[0] for outer, _ in f.rings for p in outer]
+                ys = [p[1] for outer, _ in f.rings for p in outer]
+                cx, cy, r = sum(xs) / len(xs), sum(ys) / len(ys), 0
+                im = Image.new('L', (W, H), 0)
+                for outer, _ in f.rings:
+                    ImageDraw.Draw(im).polygon(outer, fill=1)
+                m = ndi.binary_dilation(np.array(im, bool), iterations=2)
+            else:
+                if f.rings:
+                    xs = [p[0] for outer, _ in f.rings for p in outer]
+                    ys = [p[1] for outer, _ in f.rings for p in outer]
+                    cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+                elif f.pt:
+                    cx, cy = f.pt
+                else:
+                    continue
+                yy, xx = np.ogrid[:H, :W]
+                m = (xx - cx) ** 2 + (yy - cy) ** 2 <= 14 ** 2
+            m &= (self.B == 0) & ~self.street
+            pave = m & soft
+            self.G[pave] = T_CONCRETE
+            self.V[pave] = V_NONE
+            out.append((f, np.nonzero(m)))
+        return out
 
     def _trim_buildings(self):
         """Roads and sidewalks win where a mapped outline reaches over them: vanilla never builds on a
