@@ -64,6 +64,10 @@ BAR_AMENITY = {'bar', 'pub', 'nightclub', 'biergarten', 'stripclub', 'music_venu
 SHOPFRONT = ('retail', 'bar', 'restaurant', 'cafe')
 TENANT_RANK = {'bar': 0, 'restaurant': 1, 'cafe': 2, 'retail': 3, 'bank': 4}     # who wins a shared room
 FOOD_AMENITY = {'restaurant', 'fast_food', 'food_court'}
+# house rooms are partitioned at vanilla's sizes (median living room 29, kitchen and dining room 20, bedroom 15,
+# kids' bedroom 12): a real house two or three times a Knox County one gets more rooms, not bigger ones
+HOUSE_ROOM = 24
+HOUSE_BEDROOM = 17
 # use -> (main room, back rooms in turn, has a customer bathroom)
 PROGRAMME = {
     'bar': ('bar', ['barkitchen', 'barstorage'], True),
@@ -387,6 +391,11 @@ class BuildingGen:
         self.fixtures = defaultdict(list)    # (x,y,z) -> tiles appended after walls
         self.occupied = defaultdict(set)     # bid -> {(x,y,z)} used by furniture/stairs
         self._rows = {}                      # row of homes -> its homes, waiting for their one roof
+        self._stamp_recent = {}              # use -> vanilla buildings placed lately (no twins side by side)
+        self._lot_owner = None                # which building's lot every square is (nearest original outline)
+        self._lot_b0 = None
+        self._drive = set()
+        self.stamping = False                # True: every building is a copied vanilla one (stamps.py)
         self.stats = defaultdict(int)
         self.furnisher = Furnisher(self, seed)
         self.roofer = Roofer(seed)
@@ -467,7 +476,10 @@ class BuildingGen:
             elif lu == 4:
                 use = 'church'
             elif homely:
-                use = 'house' if area < 320 else 'apartments'     # (real houses are bigger than vanilla's 60-100)
+                # (real houses are bigger than vanilla's 60-100; copied from vanilla, a house is a house up to
+                # about 500 square metres of footprint, a block of flats beyond)
+                big = 500 * getattr(self, 'scale', 1.0) ** 2 if getattr(self, 'stamping', False) else 320
+                use = 'house' if area < big else 'apartments'
             if use != 'generic':
                 self.stats['untagged read as ' + use] += 1
         levels = self._levels(tags, use, area)
@@ -500,6 +512,8 @@ class BuildingGen:
             prog = (ck, [ck, ck, 'office'], True)
             self.stats['school: ' + school] += 1
         self.stats[use] += 1
+        if getattr(self, 'stamping', False):
+            return self._stamp(bid, use, mask, ox, oy, levels)
         if use == 'house' and 'building:levels' not in tags:
             levels = self._levels(tags, 'house', area)   # (an untagged building read as a house)
         if use in ('house', 'shed', 'garage'):
@@ -515,7 +529,7 @@ class BuildingGen:
         # The ground floor is cut into street units; big buildings get bigger units, not more of them.
         gt = G_TARGET.get(use, 160)
         if use == 'house':
-            gt = max(40, area // 5)                  # about five rooms a floor, not a warren
+            gt = HOUSE_ROOM                          # rooms of vanilla's size: a big house has more of them
         if use not in ('house', 'shed', 'garage'):
             gt = int(gt * min(3.0, max(1.0, area / 1500.0)))
         P = np.zeros((h + 2, w + 2), bool)
@@ -587,7 +601,7 @@ class BuildingGen:
         stairs = None
         lab1 = lab0
         if levels > 1:
-            ut = {'rooms': 50, 'homes': 130, 'bedrooms': max(20, area // 5), 'offices': int(120 * min(1.5, max(1.0, area / 1500.0)))}.get(
+            ut = {'rooms': 50, 'homes': 130, 'bedrooms': HOUSE_BEDROOM, 'offices': int(120 * min(1.5, max(1.0, area / 1500.0)))}.get(
                 upper, G_TARGET.get(use, 90))
             lab1, halls, suite, service = self._upper_layout(mask, upper, ut)
             stairs = self._stairs(lab0, lab1, doors, int0, stair_rooms, halls | service)
@@ -676,6 +690,226 @@ class BuildingGen:
         return dict(use=use, levels=levels, tall=self._true_levels(tags) or levels, rooms=int(lab0.max()), lab=lab0,
                     labs=labs, int_doors=int_doors, opens=opens, names=names, doors=doors, stairs=stairs, ox=ox, oy=oy,
                     name=tags.get('name'))
+
+    # which vanilla buildings may stand in for a real one, closest first
+    STAMP_GROUP = {'house': ('house', 'apartments'), 'apartments': ('apartments', 'house', 'hotel'),
+                   'shed': ('shed', 'garage', 'house'), 'garage': ('garage', 'shed', 'house'),
+                   'restaurant': ('restaurant', 'cafe', 'bar'), 'cafe': ('cafe', 'restaurant', 'bar'),
+                   'bar': ('bar', 'restaurant', 'cafe'), 'retail': ('retail', 'market', 'restaurant'),
+                   'market': ('market', 'retail'), 'gas': ('gas', 'retail'), 'school': ('school', 'library', 'office', 'church'),
+                   'church': ('church', 'library', 'office'), 'clinic': ('clinic', 'office'), 'dentist': ('clinic', 'office'),
+                   'bank': ('bank', 'office'), 'office': ('office', 'bank', 'clinic', 'retail'),
+                   'civic': ('office', 'library', 'police'), 'library': ('library', 'office'),
+                   'police': ('police', 'office'), 'fire': ('fire', 'police', 'warehouse'),
+                   'hotel': ('hotel', 'apartments'), 'warehouse': ('warehouse', 'garage', 'retail'),
+                   'theatre': ('theatre', 'retail'), 'community': ('library', 'church', 'office'),
+                   'post': ('office', 'bank', 'retail'), 'museum': ('library', 'retail'), 'gym': ('retail', 'warehouse'),
+                   'studio': ('office', 'retail'), 'parking': ('garage', 'warehouse'), 'generic': ('retail', 'office')}
+    COMMERCIAL = ('retail', 'restaurant', 'office', 'market', 'cafe', 'bar', 'clinic', 'bank', 'warehouse')
+    HOMES = ('house', 'apartments', 'garage', 'shed')
+
+    def _stamp(self, bid, use, mask, ox, oy, levels):
+        """Put the vanilla building closest to this real one in its place: the same use (else the nearest),
+        its door on the side facing the street, its footprint inside the real lot (its outline, the yard round
+        it, never another building, the street or the sidewalk), about the real size and height, and not the
+        one just used nearby. Nothing fits: the lot is left empty. -> building info, or None"""
+        import stamps
+        lib = stamps.load()
+        G, rng = self.ground, self.rng
+        h, w = mask.shape
+        area = int(mask.sum())
+        ys, xs = np.nonzero(mask)
+        rx0, rx1, ry0, ry1 = ox + int(xs.min()), ox + int(xs.max()), oy + int(ys.min()), oy + int(ys.max())
+
+        def rd(x, y):
+            return self.rd[min(max(y, 0), G.H - 1), min(max(x, 0), G.W - 1)]
+        side_d = {'N': np.mean([rd(x, ry0 - 2) for x in range(rx0, rx1 + 1)]),
+                  'S': np.mean([rd(x, ry1 + 2) for x in range(rx0, rx1 + 1)]),
+                  'W': np.mean([rd(rx0 - 2, y) for y in range(ry0, ry1 + 1)]),
+                  'E': np.mean([rd(rx1 + 2, y) for y in range(ry0, ry1 + 1)])}
+        front = min(side_d, key=side_d.get)
+        # where it may stand: a window round the real outline
+        E = max(4, int(0.3 * max(rx1 - rx0, ry1 - ry0)))
+        X0, Y0 = max(2, rx0 - E), max(2, ry0 - E)
+        X1, Y1 = min(G.W - 3, rx1 + E), min(G.H - 3, ry1 + E)
+        if X1 <= X0 or Y1 <= Y0:
+            G.B[oy:oy + h, ox:ox + w][mask] = 0
+            return None
+        win = G.B[Y0:Y1 + 1, X0:X1 + 1]
+        band = getattr(G, 'sidewalk_band', None)
+        ok = ((win == 0) | (win == bid)) & ~G.street[Y0:Y1 + 1, X0:X1 + 1]
+        if band is not None:
+            ok &= ~band[Y0:Y1 + 1, X0:X1 + 1]
+        from scipy import ndimage as _ndi
+        clear = _ndi.binary_erosion(ok, iterations=1, border_value=0)      # a square of room round it for its walls
+        recent = self._stamp_recent.setdefault(use, deque(maxlen=12))
+        cands = []
+        group = self.STAMP_GROUP.get(use, ('retail',))
+        fallback = group + (self.HOMES if use in self.HOMES else
+                            ('office', 'library', 'clinic') if use in ('school', 'church') else self.COMMERCIAL)
+        for gi, u in enumerate(dict.fromkeys(fallback)):
+            for st in lib['by_use'].get(u, ()):
+                if st['front'] != front or st['w'] > X1 - X0 - 1 or st['h'] > Y1 - Y0 - 1:
+                    continue
+                a = len(st['foot'])
+                score = -abs(np.log(a / max(1.0, area))) - 0.6 * gi - 0.25 * abs(st['levels'] - levels) \
+                    + 0.35 * rng.random() - (0.8 if id(st) in recent else 0.0)
+                cands.append((score, id(st), st))
+        cands.sort(key=lambda c: -c[0])
+        if self._lot_b0 is None:
+            self._lot_b0 = G.B.copy()                     # the real outlines, before copies move them
+        if getattr(self, '_occupied', None) is None:
+            self._occupied = np.zeros((G.H, G.W), bool)        # every square a placed copy covers, eaves too
+        occ = self._occupied
+
+        def fits(st, X, Y):
+            """Every floor's rooms (and a square round them for the walls) on free ground of this lot, and
+            nothing of it (walls, eaves, roof) on anything placed before."""
+            ex0, ey0 = st['eo']
+            ea, rad = st['ea'], st['rad']
+            x0, y0 = X + ex0, Y + ey0
+            eh, ew = ea.shape
+            if x0 < 1 or y0 < 1 or x0 + ew > G.W - 1 or y0 + eh > G.H - 1:
+                return False
+            sl = (slice(y0, y0 + eh), slice(x0, x0 + ew))
+            Bs = G.B[sl]
+            free = ((Bs == 0) | (Bs == bid)) & ~G.street[sl]
+            if band is not None:
+                free &= ~band[sl]
+            return not (rad & ~free).any() and not (ea & occ[sl]).any()
+
+        for score, _, st in cands[:400]:
+            if 'ea' not in st:
+                stamps.shape_of(st)
+            sw, sh = st['w'], st['h']
+            # the front lines up with the real front, centred along it; then slid along it and back from it
+            if front in 'NS':
+                base = (rx0 + (rx1 - rx0 + 1 - sw) // 2, ry0 if front == 'N' else ry1 - sh + 1)
+                moves = [(a_, b_ * (1 if front == 'N' else -1)) for b_ in (0, 1, 2, 3) for a_ in (0, -1, 1, -2, 2, -3, 3)]
+            else:
+                base = (rx0 if front == 'W' else rx1 - sw + 1, ry0 + (ry1 - ry0 + 1 - sh) // 2)
+                moves = [(b_ * (1 if front == 'W' else -1), a_) for b_ in (0, 1, 2, 3) for a_ in (0, -1, 1, -2, 2, -3, 3)]
+            for mx, my in moves:
+                X, Y = base[0] + mx, base[1] + my
+                if fits(st, X, Y):
+                    ex0, ey0 = st['eo']
+                    eh, ew = st['ea'].shape
+                    occ[Y + ey0:Y + ey0 + eh, X + ex0:X + ex0 + ew] |= st['ea']
+                    return self._stamp_put(bid, st, X, Y, mask, ox, oy, use, recent)
+        self.stats['lots left empty: no vanilla building fits'] += 1
+        G.B[oy:oy + h, ox:ox + w][mask] = 0
+        return None
+
+    def _stamp_put(self, bid, st, X, Y, mask, ox, oy, use, recent):
+        import stamps
+        lib = stamps.load()
+        G, md = self.ground, self.md
+        names = lib['tiles']
+        h, w = mask.shape
+        G.B[oy:oy + h, ox:ox + w][mask & (G.B[oy:oy + h, ox:ox + w] == bid)] = 0
+        for (dx, dy) in st['foot']:
+            G.B[Y + dy, X + dx] = bid
+        for dx, dy, z, inside, ids in st['data']:
+            x, y = X + dx, Y + dy
+            if not (0 <= x < G.W and 0 <= y < G.H):
+                continue
+            tl = [names[i] for i in ids]
+            if inside:
+                md.put(x, y, z, tl)
+            else:
+                for t in tl:
+                    md.add(x, y, z, t)
+        room_ids = [md.add_room(name, lvl, [(X + x, Y + y, rw, rh) for (x, y, rw, rh) in rects],
+                                objs=[(t, X + x, Y + y) for (t, x, y) in objs])
+                    for name, lvl, rects, objs in st['rooms']]
+        md.buildings.append(room_ids)
+        recent.append(id(st))
+        self.stats['vanilla buildings placed'] += 1
+        self.stats['vanilla ' + st['use'] + (' for ' + use if st['use'] != use else '')] += 1
+        fm = st['fm']
+        lab = fm.astype(np.int32)
+        dx, dy = st['door']
+        f = st['front']
+        edge = {'N': ('h', dx, dy, (dx, dy), (dx, dy - 1)), 'S': ('h', dx, dy + 1, (dx, dy), (dx, dy + 1)),
+                'W': ('v', dx, dy, (dx, dy), (dx - 1, dy)), 'E': ('v', dx + 1, dy, (dx, dy), (dx + 1, dy))}[f]
+        if st['use'] == 'house':
+            self._drive = self._driveway(X, Y, fm, [edge])
+            self._stamp_yard(st, X, Y, bid)
+            self._front_path(st, X, Y, bid)
+            self._dress_yard(X, Y, fm, [edge], bid)
+        main = max(((r[0], sum(rw * rh for (_, _, rw, rh) in r[2])) for r in st['rooms'] if r[1] == 0),
+                   key=lambda t: t[1], default=('empty', 0))[0]
+        return dict(use=st['use'], levels=st['levels'], tall=st['levels'], rooms=len(room_ids), lab=lab,
+                    labs=[lab], int_doors=[], opens=[], names=[{1: main}], doors=[edge], stairs=None, ox=X, oy=Y,
+                    name=None, vanilla=True)
+
+    PATH = 'floors_exterior_tilesandstone_01_3'      # vanilla's front path: 25,500 of its 48,000 yard paving squares
+    SOFT = ('blends_natural', 'blends_grassoverlays', 'vegetation_groundcover')
+
+    def _lot_ok(self, x, y, bid):
+        """A square of this house's real lot that is free: no building, street, sidewalk, water or driveway."""
+        G = self.ground
+        if not (0 <= x < G.W and 0 <= y < G.H) or G.B[y, x] != 0 or G.street[y, x]:
+            return False
+        band = getattr(G, 'sidewalk_band', None)
+        if band is not None and band[y, x]:
+            return False
+        if self._lot_owner is None:
+            from scipy import ndimage as _ndi
+            _, (iy, ix) = _ndi.distance_transform_edt(self._lot_b0 == 0, return_indices=True)
+            self._lot_owner = self._lot_b0[iy, ix]
+        from ground import T_WATER
+        return self._lot_owner[y, x] == bid and G.G[y, x] != T_WATER and (x, y) not in (self._drive or ())
+
+    def _stamp_yard(self, st, X, Y, bid):
+        """The vanilla house's own yard, where it was round it: its paving (path, patio, deck), its plants and
+        trees, garden beds, patio furniture, grill, clothesline, play things, wherever this lot has room."""
+        lib = __import__('stamps').load()
+        names = lib['tiles']
+        md = self.md
+        n = 0
+        for dx, dy, gid, ob in st.get('yard', ()):
+            x, y = X + dx, Y + dy
+            if not self._lot_ok(x, y, bid):
+                continue
+            tl = md.squares.get((x, y, 0), [])
+            if gid >= 0:
+                tl = [names[gid]] + [t for t in tl[1:] if not t.startswith(self.SOFT)]
+            tl = list(tl) + [names[i] for i in ob]
+            md.put(x, y, 0, tl)
+            n += 1
+        if n:
+            self.stats['yard squares copied with their house'] += n
+
+    def _front_path(self, st, X, Y, bid):
+        """A path from the front door to the sidewalk, as nearly every vanilla house has: straight out from the
+        door (past its own porch), on to the sidewalk, the street or the driveway."""
+        G, md = self.ground, self.md
+        o = {'N': (0, -1), 'S': (0, 1), 'W': (-1, 0), 'E': (1, 0)}[st['front']]
+        x, y = X + st['door'][0] + o[0], Y + st['door'][1] + o[1]
+        band = getattr(G, 'sidewalk_band', None)
+        path = []
+        for _ in range(45):
+            if not (0 <= x < G.W and 0 <= y < G.H):
+                return
+            if G.street[y, x] or (band is not None and band[y, x]) or (x, y) in (self._drive or ()):
+                break
+            if G.B[y, x] == bid:                         # its own porch
+                x, y = x + o[0], y + o[1]
+                continue
+            if not self._lot_ok(x, y, bid):
+                return
+            path.append((x, y))
+            x, y = x + o[0], y + o[1]
+        else:
+            return
+        for (x, y) in path:
+            tl = md.squares.get((x, y, 0), [])
+            if tl and tl[0].startswith('floors_exterior'):
+                continue                                 # its copied path already
+            md.put(x, y, 0, [self.PATH] + [t for t in tl[1:] if not t.startswith(self.SOFT)
+                                           and not t.startswith(('vegetation_', 'f_bushes', 'e_'))])
+        self.stats['front paths'] += 1
 
     def _school_rooms(self, labs, names, levels, doors, kind, keep_halls=False):
         """A school with the rooms of vanilla's 22 schools: classrooms of the school's kind off its corridors; on
@@ -1593,12 +1827,16 @@ class BuildingGen:
                 tree(rs, first, lambda q: 0)
         if upper == 'bedrooms':                          # a house's upstairs: bedrooms and a bathroom off the landing
             order = sorted(single, key=lambda r: sizes[r])
-            beds = 0
+            beds = baths = 0
             for i, r in enumerate(order):
                 if i == 0 and len(order) > 1:
                     nm[r] = 'bathroom'
+                    baths += 1
                 elif sizes[r] < 9:
                     nm[r] = 'closet'
+                elif baths < 2 and beds >= 3 and sizes[r] <= 14:
+                    nm[r] = 'bathroom'                   # a big house: a second bathroom for its bedrooms
+                    baths += 1
                 else:
                     nm[r] = 'bedroom' if beds != 1 or rng.random() < 0.6 else 'kidsbedroom'
                     beds += 1
@@ -2830,7 +3068,8 @@ class BuildingGen:
         if others:
             nm[others[0]] = 'bathroom'
         beds = 0
-        downstairs = ['diningroom', 'laundry', 'bedroom']        # a guest room downstairs is common in vanilla
+        # a guest room downstairs is common in vanilla; a big (real) house has an office and a second bathroom too
+        downstairs = ['diningroom', 'laundry', 'bedroom', 'office', 'bathroom', 'bedroom']
         for r in reversed(others[1:]):
             if sizes[r] < 9:
                 nm[r] = 'closet'

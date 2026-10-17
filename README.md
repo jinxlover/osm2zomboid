@@ -1,5 +1,10 @@
 # osm2zomboid
 
+> **This project is retired (October 2026).** For turning a real place into a Project Zomboid map, use
+> **[KnoxMap](https://github.com/spytheeuclidean-a11y/knoxmap)**: on a side-by-side of the same neighbourhood its
+> streets and lots came out clearly ahead. The code stays here, MIT-licensed, for reference. Its vanilla-calibrated
+> checks (`audit.py`) and the vanilla building copier (`stamps.py`) are free for anyone to reuse.
+
 **Turn any real place into a playable Project Zomboid (Build 42) map, built the way the game's own map is built.**
 
 osm2zomboid is a **free and open-source** project, released under the [MIT License](LICENSE): anyone may use it,
@@ -8,9 +13,10 @@ study it, change it and share it, including their changes. Contributions are wel
 
 It reads a real area from [OpenStreetMap](https://www.openstreetmap.org) (streets, buildings, land use, shops,
 parks, car parks) and writes a ready-to-install map mod: terrain, roads with curbs and lane lines, sidewalks,
-car parks with cars, lawns and driveways, and every building fully built: walls, shop fronts, doors, windows,
-stairs, lifts, roofs, and rooms furnished like Knox County's. It writes the game's map files directly; no
-TileZed or WorldEd is needed.
+car parks with cars, lawns, driveways and street lights, and in place of every real building **the closest
+building of the vanilla map, copied whole**: its walls, roof, rooms, furniture, curtains and decor exactly as The
+Indie Stone built them, with its yard (front path, patio, garden beds, patio furniture, plants). It writes the
+game's map files directly; no TileZed or WorldEd is needed.
 
 ## Goals
 * **One shot.** Point it at your town, your street or a big piece of your city, and get a map you can play
@@ -88,6 +94,7 @@ python generate.py --name MyTown --title "My Town" --lat 40.7484 --lon -73.9857 
 | file | job |
 |---|---|
 | `osmfetch.py`, `osmmodel.py` | download OpenStreetMap features; project them to tile coordinates, rotated to the street grid |
+| `stamps.py` | cut every building (with its rooms, roof and yard) out of your vanilla map; the closest one replaces each real building |
 | `ground.py` | read the outdoor tags: terrain class per square (from `surface`, `landuse`, `leisure`, `natural`...), road widths from lanes / width / parking tags, sidewalks, car parks, vegetation zones, crossings, fences, street objects, entrances |
 | `terrain.py` | ground tiles the vanilla way: surface families, edge blends, curbs, grass tufts, lane lines, crosswalks, parking stalls, trees, lamps, signals, benches, fences, zombie density |
 | `buildings.py` | footprint -> walls / doors / windows / storefronts, room layout, room programme from the tags, stairs, roofs |
@@ -140,7 +147,23 @@ Nothing about tile choice is guessed; the rules in `terrain.py` were measured on
   walk around buildings instead of through them. The format comes from the game's own map converter; the writer
   reproduces all 4,065 vanilla files byte for byte, and its rules match vanilla on 99.8% of squares or better.
 
-## Buildings and furniture
+## Vanilla buildings (the default)
+Generated interiors never looked handcrafted, so by default no building is generated: `stamps.py` cuts every
+building out of **your own copy** of the vanilla map once (about 2,900 different ones: 1,860 houses, 340 shops,
+140 apartment buildings, 74 restaurants, 18 schools, 13 gas stations, garages, offices, churches, clinics, banks,
+police and fire stations; stored in `cache/`, never published), and each real building is replaced by one of them:
+* **the same use** as the real one (from its tags and the businesses mapped in it), else the nearest kind;
+* **facing the same street**: the vanilla building's front door (the door side nearest a road on the vanilla map)
+  on the real building's street side;
+* **about the same size and height**, inside the real lot: every floor, its walls, eaves and roof clear of the
+  neighbours, the street and the sidewalk; not the same one twice side by side;
+* with **its own yard** where the real lot has room for it, and a stone path from the front door to the sidewalk,
+  as nearly every vanilla house has; driveways and fences as before.
+If no vanilla building fits a lot, the lot is left empty (the build says how many). Suburban streets get vanilla's
+residential street lights (a wooden pole with its lamp over the street, one every ~60 squares). `--buildings
+generate` builds them from rules instead, as below.
+
+## Generated buildings and furniture (--buildings generate)
 The rules below were read off the vanilla map (`plan.py` and `preview.py` draw any vanilla block for comparison),
 and `audit.py` checks a generated map against them (see "Checking a map").
 * **What a building is.** Its own tags first. A business mapped in or just in front of a building takes the

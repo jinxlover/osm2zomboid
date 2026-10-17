@@ -49,6 +49,9 @@ BUSHES = [f'vegetation_foliage_01_{i}' for i in range(8, 15)]
 PLANTS = [f'vegetation_groundcover_01_{i}' for i in range(18, 24)]
 FLOWERS = [f'vegetation_ornamental_01_{i}' for i in (16, 17, 18, 19, 20, 21, 22, 23)]
 LAMP = 'lighting_outdoor_01_3'
+POLE = 'lighting_outdoor_01_16'                # vanilla's residential street light: a wooden pole...
+POLE_HEAD = {'N': 'lighting_outdoor_01_8', 'E': 'lighting_outdoor_01_9', 'S': 'lighting_outdoor_01_10',
+             'W': 'lighting_outdoor_01_11'}     # ...its lamp a floor up, over the street on that side of it
 # traffic signals as vanilla builds them: a plain pole on the sidewalk square, the signal head on the same
 # square one level up, picked by the side the road is on (two head styles per side)
 SIGNAL_POLE = 'lighting_outdoor_01_16'
@@ -766,14 +769,27 @@ def decorate(md, g, rng, keep_clear=()):
     # ---- fences, walls, hedges
     _place_fences(md, g, blocked | occupied, rng)
 
-    # ---- street lamps where OSM did not give any (every ~18 squares along lit streets)
-    lamps = [(x, y) for (x, y) in occupied if md.squares.get((x, y, 0), [None])[-1] == LAMP]
-    cand = [tuple(int(v) for v in c[::-1]) for c in np.argwhere((rd >= 1) & (rd < 2.3) & ground & np.isin(G, [T_PAVE, T_PLAZA, T_BRICK, T_LAWN]) & (bd > 1.5))]
+    # ---- street lamps where OSM did not give any: downtown a lamp post every ~18 squares; in the suburbs what
+    # vanilla's residential streets have, a wooden pole at the curb with its lamp head over the street, one
+    # every ~60 squares (583 along 34,850 squares of Riverside, Muldraugh and West Point streets)
+    lamps = [(x, y) for (x, y) in occupied if md.squares.get((x, y, 0), [None])[-1] in (LAMP, POLE)]
+    suburb = (g.coverage < 0.25) | ((g.landuse == 1) & (g.coverage < 0.4))   # residential land, not downtown
+    cand = [tuple(int(v) for v in c[::-1]) for c in np.argwhere((rd >= 1) & (rd < 2.3) & ground & np.isin(G, [T_PAVE, T_PLAZA, T_BRICK, T_LAWN, T_GRASS]) & (bd > 1.5))]
     rng.shuffle(cand)
     for x, y in cand:
-        if free(x, y) and all((x - lx) ** 2 + (y - ly) ** 2 > 18 ** 2 for lx, ly in lamps):
+        sub = bool(suburb[y, x])
+        gap = 60 if sub else 18
+        if sub and int(rd[y, x]) != 1:
+            continue                                     # the pole stands at the curb
+        if not sub and G[y, x] == T_GRASS:
+            continue
+        if free(x, y) and all((x - lx) ** 2 + (y - ly) ** 2 > gap ** 2 for lx, ly in lamps):
             lamps.append((x, y))
-            put(x, y, LAMP)
+            if sub:
+                put(x, y, POLE)
+                md.add(x, y, 1, POLE_HEAD[toward_street(x, y)])
+            else:
+                put(x, y, LAMP)
 
     # ---- parking meters along streets with on-street parking
     for rdd in g.roads:

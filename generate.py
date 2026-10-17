@@ -322,7 +322,8 @@ def make(args):
     for f in feats:
         if f.kind == 'node' and any(k in f.tags for k in ('amenity', 'shop', 'tourism', 'office')) and                 f.tags.get('amenity') not in NOT_A_PLACE and 0 <= f.pt[0] < W and 0 <= f.pt[1] < H:
             busy.add(int(g.B[int(f.pt[1]), int(f.pt[0])]))
-    nrow = split_rows(g, busy=busy - {0})
+    # with vanilla buildings a block of flats is one of vanilla's apartment buildings, not a row of house slices
+    nrow = split_rows(g, busy=busy - {0}) if getattr(args, 'buildings', 'vanilla') == 'generate' else 0
     if nrow:
         print('big buildings among houses split into rows of homes: %d units' % nrow)
     md = lotwriter.MapData(W, H, cx0, cy0)
@@ -401,6 +402,8 @@ def make(args):
     road_dist = ndi.distance_transform_edt(~g.street)
     front_dist = ndi.distance_transform_edt(~g.main_street) if g.main_street.any() else road_dist
     bg = BuildingGen(md, g, road_dist, seed=args.seed, max_levels=args.max_levels, front_dist=front_dist)
+    bg.stamping = getattr(args, 'buildings', 'vanilla') == 'vanilla'
+    bg.scale = args.scale
     slices = ndi.find_objects(g.B)
     infos = {}
     for bid in range(1, len(slices) + 1):
@@ -740,6 +743,9 @@ if __name__ == '__main__':
                     help='quick test: build only the buildings touching this box of world squares (streets and '
                          'terrain still cover the whole map); written to output/<name>_test, never installed')
     ap.add_argument('--pz-dir', default=None, help='Project Zomboid install folder (auto-detected normally)')
+    ap.add_argument('--buildings', default='vanilla', choices=['vanilla', 'generate'],
+                    help="vanilla: every real building is replaced by the closest vanilla one, copied whole "
+                         "(its rooms, furniture and roof as the game has them); generate: built from rules")
     a = ap.parse_args()
     if a.pz_dir:
         os.environ['PZ_DIR'] = a.pz_dir
