@@ -5,7 +5,7 @@ door; the rooms behind belong to the unit they back onto (kitchen, storage, offi
 flats and hotels are entered through a lobby, which holds the stairs. Upper floors: corridors with guest
 rooms, flats or offices off them. Nobody sleeps on the ground floor of a downtown block."""
 import random
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 import numpy as np
 from scipy import ndimage as ndi
 
@@ -1848,8 +1848,10 @@ class BuildingGen:
             else:
                 b = (b[0] - (np.sign(b[0] - a[0]) if a[0] != b[0] else 0), b[1] - (np.sign(b[1] - a[1]) if a[1] != b[1] else 0))
             lines[gap] = (a, b)
+            # a home's yard is fenced in wood: vanilla's wooden mix round houses (low board 21, picket 16, tall 5)
+            ftype = rng.choices(['wood', 'picket', 'panel'], weights=[21, 16, 5])[0]
             for a, b in lines:
-                g.barriers.append(('fence', [tuple(map(float, a)), tuple(map(float, b))], {'barrier': 'fence', 'fence_type': 'chain_link'}))
+                g.barriers.append(('fence', [tuple(map(float, a)), tuple(map(float, b))], {'barrier': 'fence', 'fence_type': ftype}))
             self.stats['house yards fenced'] += 1
             break
 
@@ -1968,14 +1970,14 @@ class BuildingGen:
             m[r[1]:r[1] + r[3], r[0]:r[0] + r[2]] = False
         if m.any():
             return False
-        placed, flat = [], []                            # (x, y, roof) in mask coordinates; flat rectangles
+        placed, flat = [], []                            # (x, y, roof, w, h) in mask coordinates; flat rectangles
         for (rx, ry, rw, rh) in rects:
             if rw * rh < 6 or min(rw, rh) < 2:            # a notch or a sliver: a flat cap
                 flat.append((rx, ry, rw, rh))
                 continue
-            roof = _p.roof_for(rw, rh, self.rng)
+            roof = _p.roof_for(rw, rh, self.rng, paint=True)     # the parts of one house share a colour
             if roof:
-                placed.append((rx, ry, roof))
+                placed.append((rx, ry, roof, rw, rh))
                 continue
             done = False
             for k in (2, 3):
@@ -1985,9 +1987,9 @@ class BuildingGen:
                     break
                 parts = [(rx, ry + i * D // k, rw, (i + 1) * D // k - i * D // k) if along_x else
                          (rx + i * D // k, ry, (i + 1) * D // k - i * D // k, rh) for i in range(k)]
-                roofs = [_p.roof_for(pw, ph, self.rng) for _, _, pw, ph in parts]
+                roofs = [_p.roof_for(pw, ph, self.rng, paint=True) for _, _, pw, ph in parts]
                 if all(roofs):
-                    placed += [(px, py, rf) for (px, py, _, _), rf in zip(parts, roofs)]
+                    placed += [(px, py, rf, pw, ph) for (px, py, pw, ph), rf in zip(parts, roofs)]
                     done = True
                     break
             if not done:
@@ -1997,8 +1999,13 @@ class BuildingGen:
         inside = {(ox + int(x), oy + int(y)) for y, x in zip(ys, xs)}
         several = len(placed) > 1 or flat
         sheet = sheet or (self.rng.choice(self.ROOF_SHEETS) if several else None)
-        for (rx, ry, roof) in placed:
-            self._place_roof(levels, ox + x0 + rx, oy + y0 + ry, roof, sheet, inside)
+        fixed = [r for _, _, r, _, _ in placed if not _p.paintable(r)]
+        if sheet and fixed:                              # a part that keeps its own colour sets the house's
+            own = Counter(t[:8] for _, _, _, tl in fixed[0] for t in tl
+                          if t.startswith('roofs_0') and t[:8] in self.ROOF_SHEETS)
+            sheet = own.most_common(1)[0][0] if own else sheet
+        for (rx, ry, roof, rw, rh) in placed:
+            self._place_roof(levels, ox + x0 + rx, oy + y0 + ry, roof, sheet, inside, (rw, rh))
         floor = self.roofer.floor()
         for (rx, ry, rw, rh) in flat:                   # the thin wing: a low flat roof
             for a in range(rw):
@@ -2100,16 +2107,23 @@ class BuildingGen:
         H, W = int(ys.max()) - y0 + 1, int(xs.max()) - x0 + 1
         if len(ys) != W * H:
             return False
-        roof = pitched.roof_for(W, H, self.rng)
+        roof = pitched.roof_for(W, H, self.rng, paint=sheet is not None)
         if not roof:
             self.stats['houses without a vanilla roof of their size'] += 1
             return False
-        self._place_roof(levels, ox + x0, oy + y0, roof, sheet, inside)
+        self._place_roof(levels, ox + x0, oy + y0, roof, sheet, inside, (W, H))
         self.stats['pitched roofs'] += 1
         return True
 
-    def _place_roof(self, levels, X0, Y0, roof, sheet=None, inside=None):
+    def _place_roof(self, levels, X0, Y0, roof, sheet=None, inside=None, size=None):
+        """size: (w, h) of the roof's own box; with `inside` (the building's squares) the pieces this roof
+        hangs over its own box are left off where they would land on another roof of the same building
+        (two roof surfaces on one square flicker in game)."""
         top = levels - 1
+        if size and inside:
+            w_, h_ = size
+            roof = [(dx, dy, dz, tl) for dx, dy, dz, tl in roof
+                    if (0 <= dx < w_ and 0 <= dy < h_) or (X0 + dx, Y0 + dy) not in inside]
         # the eave row a level below the roof (copied from one-storey vanilla houses) reads as loose triangles
         # on our walls, and vanilla's two-storey houses have none: the roof keeps its surface and gables
         roof = [(dx, dy, dz, [t for t in tl if not (dz <= 0 and t.startswith('roofs_'))]) for dx, dy, dz, tl in roof]

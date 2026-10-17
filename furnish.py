@@ -24,6 +24,7 @@ into furniture for a new room:
      piece stays walkable, nothing may cut the walkable floor in two, at most ~45% of a room is
      blocked, nothing is backed against shop-window glass, and every room gets a light switch.
 """
+import collections
 import math
 import json
 import os
@@ -182,6 +183,7 @@ class Furnisher:
         self.bg = bg
         self.rng = random.Random(seed * 7919 + 13)
         self.count = {}
+        self.stats_fallback = collections.Counter()   # rooms that needed a second try
         stats()
 
     # ------------------------------------------------------------------ walls of the building
@@ -244,9 +246,27 @@ class Furnisher:
                 ys, xs = (lab == r).nonzero()
                 squares = {(ox + int(x), oy + int(y)) for y, x in zip(ys, xs)}
                 if len(squares) >= 2:
+                    keep = {(x, y): list(self.bg.fixtures.get((x, y, z), ())) for (x, y) in squares}
                     self.furnish_room(nm, squares, z, blocked)
+                    if len(squares) >= 4 and nm in self.RENAMEABLE and self._missing(nm, squares, z):
+                        # a strip a square or two wide is a corridor; another odd room a store room: vanilla
+                        # never has a bedroom without a bed or a dining room without a table
+                        rect = self._largest_rect(squares)
+                        xs_ = {x for x, _ in rect}
+                        ys_ = {y for _, y in rect}
+                        new = 'hall' if min(len(xs_), len(ys_)) <= 2 else 'storage'
+                        if new != nm:
+                            for (x, y), v in keep.items():
+                                self.bg.fixtures[(x, y, z)] = v
+                            names[z][r] = new
+                            self.stats_fallback['rooms renamed: %s with no %s -> %s' % (
+                                nm, self._missing(nm, squares, z)[0], new)] += 1
+                            self.furnish_room(new, squares, z, blocked)
 
     NO_TEMPLATE = {'empty', 'elevator', 'stairwell'}
+    # rooms that are what their one piece makes them (a bedroom is a bed): with no room for it they are something
+    # else. A kitchen or a bathroom keeps its name with what it has: a house is not left without one
+    RENAMEABLE = {'bedroom', 'kidsbedroom', 'diningroom', 'classroom'}
     # a tower's lobby is a front desk and seats, not an apartment block's hall of drawers and wardrobes
     FRONT_DESK_USES = {'office', 'hotel', 'civic', 'bank', 'post', 'studio', 'library'}
     LOBBY_FRONT = {'Desk', 'Counter', 'Couch', 'Seat', 'Seating', 'Register', 'Reception'}
@@ -328,7 +348,8 @@ class Furnisher:
             if not doors:
                 return
             self.rng.shuffle(doors)
-            r = self.fitter.fit(name, region, doors[:4], clear=set(), walls=squares | self._open_beyond(squares, z))
+            r = self.fitter.fit(name, region, doors[:4], clear=set(), walls=squares | self._open_beyond(squares, z),
+                                edge=lambda s_, x_, y_: self.edge(s_, x_, y_, z))
             if r is None:
                 return
             place = [(x, y, t) for x, y, t in r[0] if (x, y) not in room.block]
@@ -442,7 +463,7 @@ class Furnisher:
         wins = {(x, y) for (x, y) in squares if any(self.window(s, x, y, z) for s in 'NSWE')}
         prefer = self.LOBBY_FRONT if name == 'lobby' and getattr(self.bg, 'cur_use', None) in self.FRONT_DESK_USES else ()
         r = self.fitter.fit(name, squares, doors, clear=set(blocked) & squares, windows=wins, prefer=prefer,
-                            walls=squares | self._open_beyond(squares, z))
+                            walls=squares | self._open_beyond(squares, z), edge=lambda s_, x_, y_: self.edge(s_, x_, y_, z))
         if r is None:
             return False
         place, floor, wall = r
@@ -516,8 +537,60 @@ class Furnisher:
                     self._ontop(room, styles, n)
                 elif beh == 'high':
                     self._high(room, styles, n)
+            if self._essentials_in(room, name, rs, seats):
+                # a room with doors all round (a kitchen you walk through): keep only the doorways and the square
+                # inside each clear, and try once more
+                keep = room.clear
+                tight = set(blocked) | doors
+                for (x, y) in doors:
+                    for side in 'NSWE':
+                        if self.door(side, x, y, z):
+                            dx, dy = DIRS[OPP[side]]
+                            tight.add((x + dx, y + dy))
+                room.clear = tight & keep
+                if not self._essentials_in(room, name, rs, seats):
+                    self.stats_fallback['essential placed nearer a door'] += 1
+                room.clear = keep
         self._line_walls(room, name)
         self._switch(room)
+
+    def _missing(self, name, squares, z):
+        """What every vanilla room of the kind has that this one lacks (a bed, a toilet, a dining table)."""
+        need = self.fitter._essentials(name)
+        if not need:
+            return []
+        have = {self.fitter.cat.get(t, {}).get('CustomName', '') for (x, y) in squares
+                for t in self.bg.fixtures.get((x, y, z), ())}
+        return [e for e in need if not any(e in h for h in have)]
+
+    def _essentials_in(self, room, name, rs, seats):
+        """The recipe picked one style of the bed or the table; where that one does not fit, try every style
+        vanilla rooms of the kind use, smallest first (a single bed where a double has no room).
+        -> what is still missing"""
+        for e in self._missing(name, room.squares, room.z):
+            for cat, a in rs['cats'].items():
+                if cat.split('|')[0] != e or a['p'] < 0.8:
+                    continue
+                cands = sorted({id(pc): pc for k in a['styles'] for pc in pieces(k)}.values(), key=lambda pc: pc.size)
+                for pc in cands:
+                    if pc.beh == 'wall' and self._wall(room, [pc], 1):
+                        break
+                    if pc.beh == 'ontop':                    # a sink on a counter
+                        self._ontop(room, [pc], 1)
+                        if e not in self._missing(name, room.squares, room.z):
+                            break
+                    if pc.beh == 'table':
+                        before = len(room.items)
+                        self._tables(room, [pc], 1, seats, a)
+                        if len(room.items) == before:
+                            self._tables(room, [pc], 1, seats, a, snug=True)
+                        if len(room.items) > before:
+                            break
+                else:
+                    continue
+                self.stats_fallback['essential placed in another style'] += 1
+                break
+        return self._missing(name, room.squares, room.z)
 
     # ------------------------------------------------------------------ recipe
     def _recipe(self, rs, area):
@@ -622,8 +695,16 @@ class Furnisher:
         if self._tall(piece) and any(self.window(s, cx, cy, room.z) for cx, cy in cells for s in 'NSWE'):
             return None                                   # nothing tall in front of a window
         front = self._front(cells, facing)
-        if not any(room.open_floor(c) for c in front):
+        inside = getattr(self, 'inside', ())
+        if not any(room.open_floor(c) or (c not in room.squares and c in inside) for c in front):
             return None
+        fx, fy = DIRS[facing]
+        cs = set(cells)
+        for cx, cy in cells:                              # the whole front row faces into the room: a couch or
+            if (cx + fx, cy + fy) in cs:                  # a bed pushed into a nook would face a wall
+                continue
+            if self.edge(facing, cx, cy, room.z):        # (open to the next room is floor too)
+                return None
         return cells
 
     def _wall_score(self, room, piece, facing, cells):
@@ -672,7 +753,9 @@ class Furnisher:
         return placed
 
     # ------------------------------------------------------------------ free-standing tables, desks, islands
-    def _tables(self, room, styles, n, seats, a):
+    def _tables(self, room, styles, n, seats, a, snug=False):
+        """snug: the room's one table where nothing else fits (a small dining room): the floor round it may be
+        the walk from the door, and one side may stand against the wall."""
         piece = styles[0]
         single = piece.size == 1 and len(piece.shapes) >= 2 and '' not in piece.shapes
         if single and n >= 3 and self._island(room, piece, n, seats):
@@ -685,20 +768,28 @@ class Furnisher:
             cells = [(x + dx, y + dy) for dx in range(w) for dy in range(h)]
             if not all(room.can_block(c) for c in cells):
                 return None
+            against = set()
             for dx in range(-1, w + 1):
                 for dy in range(-1, h + 1):
                     c = (x + dx, y + dy)
-                    if not (0 <= dx < w and 0 <= dy < h) and (c not in room.squares or c in room.taken
-                                                               or c in room.clear):
+                    if 0 <= dx < w and 0 <= dy < h:
+                        continue
+                    if snug and c not in room.squares and (dx in (-1, w)) != (dy in (-1, h)):
+                        against.add('W' if dx == -1 else 'E' if dx == w else 'N' if dy == -1 else 'S')
+                        continue
+                    if c not in room.squares or c in room.taken or (c in room.clear and not snug):
                         return None
+            if len(against) > 1:
+                return None
             return cells
 
         # every possible spot once, best first: spots on a regular grid win, so tables line up
         cands = []
         for facing in piece.shapes:
             w, h = piece.dims(facing)
-            for y in range(room.y0 + 1, room.y1):
-                for x in range(room.x0 + 1, room.x1):
+            e = 0 if snug else 1                           # snug: against the wall too
+            for y in range(room.y0 + e, room.y1 + 1 - e):
+                for x in range(room.x0 + e, room.x1 + 1 - e):
                     if spot(facing, x, y):
                         s = self.rng.random() * 0.5
                         s += 1.0 * ((x - room.x0 - 2) % (w + 3) == 0) + 1.0 * ((y - room.y0 - 2) % (h + 3) == 0)
@@ -775,8 +866,8 @@ class Furnisher:
         return 'table'
 
     def _seat(self, room, piece, sq, facing):
-        f = facing if facing in piece.shapes else next(iter(piece.shapes))
-        if piece.size != 1:
+        f = facing if facing in piece.shapes else ('' if '' in piece.shapes else None)
+        if piece.size != 1 or f is None:              # no chair turned the wrong way for want of the right one
             return
         self._put(room, piece, f, sq[0], sq[1], 'seat', block=False)
 
@@ -891,8 +982,9 @@ class Furnisher:
                     continue
                 cells = self._cells(piece, facing, x, y)
                 if not all(c in room.squares and (c[0], c[1], side) not in room.high
-                           and self.backable(side, c[0], c[1], z) for c in cells):
-                    continue
+                           and self.backable(side, c[0], c[1], z) and not self.edge(facing, c[0], c[1], z)
+                           for c in cells):
+                    continue                                    # (a board facing the wall a square away: no)
                 s = self.rng.random()
                 for c in cells:
                     under = room.at.get(c)
@@ -929,7 +1021,9 @@ class Furnisher:
             if not hosts:
                 break
             host = self.rng.choice(hosts)
-            facing = host.facing if host.facing in piece.shapes else next(iter(piece.shapes))
+            facing = host.facing if host.facing in piece.shapes else ('' if '' in piece.shapes else None)
+            if facing is None:                          # it would face the wall the counter stands against
+                break
             x, y = self.rng.choice(host.cells)
             self.bg.fixtures[(x, y, room.z)].append(piece.shapes[facing][0][2])
             host.top = [piece.custom]

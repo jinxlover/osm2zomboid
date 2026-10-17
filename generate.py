@@ -262,7 +262,7 @@ def make(args):
     md = lotwriter.MapData(W, H, cx0, cy0)
     terrain.lay_ground(md, g, rng)
     print(f'ground {time.time() - t0:.1f} s: {len(g.roads)} roads, {len(g.crossings)} crossings, '
-          f'{int(g.PK.max())} car parks, {len(g.barriers)} fences/walls, {len(g.pois)} street objects')
+          f'{int(g.PK.max())} car parks, {len(g.barriers)} fences/walls, {len(g.pois)} street objects, {g.pinholes} pinholes in paving filled')
 
     # ---- buildings: the shops / amenities mapped inside each outline and the entrances on its walls
     t0 = time.time()
@@ -316,6 +316,8 @@ def make(args):
     bg.emit_walls()
     print(f'buildings {time.time() - t0:.1f} s: {len(infos)} built', dict(bg.stats))
     print('furniture placed:', dict(sorted(bg.furnisher.count.items())))
+    if bg.furnisher.stats_fallback:
+        print('furnishing second tries:', dict(bg.furnisher.stats_fallback))
 
     # ---- streets: markings, then trees / lamps / signals / benches / fences
     spawns = pick_spawns(g, road_dist)

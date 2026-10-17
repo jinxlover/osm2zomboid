@@ -52,7 +52,7 @@ forest at x = 12899; the mod continues it 156 squares to the west edge of Austin
 ## Quick start
 1. Install Python 3.10+ and run once:  `pip install -r requirements.txt`
 2. Double-click **run_austin.bat** (builds the mod and copies it to `%USERPROFILE%\Zomboid\mods\Austin6thStreet`).
-   Takes about three minutes. The OpenStreetMap data for Austin is cached in `cache/`, so it works offline.
+   Takes about three minutes (a 1 km x 1 km residential area: about a minute and a half). The OpenStreetMap data for Austin is cached in `cache/`, so it works offline.
 3. Start Project Zomboid -> Mods -> enable **Austin, TX - 6th Street** -> New Game. On the spawn screen pick
    **Austin, TX - 6th Street**; you start on a sidewalk downtown (world 13568, 11108 or one of four other spots).
 4. Optional: **preview_austin.bat** renders `preview.png` (an isometric cutaway drawn with the game's own sprites;
@@ -158,10 +158,15 @@ and `audit.py` checks a generated map against them (see "Checking a map").
 * **Houses** are squared to the box shape vanilla houses have, get a vanilla pitched roof (copied from a vanilla
   house of the same width and lengthened along the ridge, kept only if it closes over the whole house when drawn),
   a living room you enter with the kitchen open to it, a dining room, laundry and bathroom, bedrooms upstairs off
-  a landing, and a yard: a mown lawn (two shades of grass and short tufts, as vanilla's yards), chain-link fence
-  round the back, bushes and flowers in front, an air conditioner on the wall, bins and a barbecue out back. About
-  80% of houses get a driveway from the street with a car spot at the house end (vanilla: 81%). Bigger or L-shaped
-  houses get several vanilla roofs (parallel roofs, a roof per wing), never a flat one.
+  a landing, and a yard: a mown lawn (two shades of grass and short tufts, as vanilla's yards), a wooden fence
+  round the back (plain boards, picket or panels), bushes and flowers in front, an air conditioner on the wall, bins
+  and a barbecue out back. About 80% of houses get a driveway from the street with a car spot at the house end
+  (vanilla: 81%). Bigger or L-shaped houses get several vanilla roofs (parallel roofs, a roof per wing) in one
+  colour, never a flat one. Chain-link fences are kept for big open fields.
+* **Every room gets what defines it**: a bed in every bedroom, a table in every dining room, a counter in every
+  kitchen (in another vanilla style, or nearer the door, when the first does not fit). A leftover strip too narrow
+  for its piece is named for what it is, a hall. Nothing faces a wall and nothing that vanilla stands against a
+  wall stands in the open (checked over every placed piece).
 * **Ground floor of other buildings.** The rooms on the street are units: a shop, a dining room, a bar, a lobby.
   Each has its own street door and shop windows, and its back rooms behind it: kitchen, stock room, toilet.
   Kitchens and stock rooms often have a back door with a lamp, and dumpsters stand by most of them. Offices, flats

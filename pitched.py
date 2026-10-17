@@ -54,8 +54,9 @@ def coverage(tiles, W, H):
     for dx, dy, dz, tl in tiles:
         for t in tl:
             place(roof, t, dx, dy, dz)
-    c = np.array(ceil)[:, :, 3] > 0
-    r = np.array(roof)[:, :, 3] > 0
+    bb = ceil.getbbox()                                # only the ceiling's pixels count
+    c = np.array(ceil.crop(bb).getchannel('A')) > 0
+    r = np.array(roof.crop(bb).getchannel('A')) > 0
     return float((c & r).sum()) / max(1, int(c.sum()))
 
 
@@ -134,8 +135,24 @@ def load():
     if _data is None:
         if not os.path.isfile(OUT):
             harvest()
-        _data = json.load(open(OUT))
+        _data = {k: [c for c in lst if not _patched(c['t'])] for k, lst in json.load(open(OUT)).items()}
+        _data = {k: v for k, v in _data.items() if v}
     return _data
+
+
+# roof pieces that mean the same in every roof sheet (vents, the flat top): a roof may borrow them from another
+SHARED = set(range(16)) | set(range(20, 32)) | {70, 71, 90, 91, 92, 93}
+
+
+def _patched(tiles):
+    """A vanilla shack roof patched with boards of another sheet (corrugated iron with wooden planks): on a
+    suburban house it reads as a glitch, so houses do not get these few."""
+    sheets = collections.Counter(t.rsplit('_', 1)[0] for _, _, _, tl in tiles for t in tl if t.startswith('roofs_0'))
+    if len(sheets) < 2:
+        return False
+    main = sheets.most_common(1)[0][0]
+    return any(not t.startswith(main + '_') and int(t.rsplit('_', 1)[1]) not in SHARED
+               for _, _, _, tl in tiles for t in tl if t.startswith('roofs_0'))
 
 
 def _stretch(tiles, W0, H0, W, H):
@@ -177,14 +194,32 @@ def _stretch(tiles, W0, H0, W, H):
     return out
 
 
-def roof_for(W, H, rng):
-    """-> list of (dx, dy, dz, [tiles]) for a W x H rectangular top floor, or None."""
+def paintable(tiles):
+    """Every roof piece means the same in every roof sheet, so the roof can take any colour (a house under
+    several roofs, a row of homes: one colour; a plank roof cannot be painted shingle)."""
+    return all(int(t.rsplit('_', 1)[1]) in SHARED for _, _, _, tl in tiles for t in tl if t.startswith('roofs_0'))
+
+
+def roof_for(W, H, rng, paint=False):
+    """-> list of (dx, dy, dz, [tiles]) for a W x H rectangular top floor, or None.
+    paint: only roofs that can be recoloured (falls back to any when no such roof fits)."""
+    if paint is True:
+        r = roof_for(W, H, rng, 'only')
+        return r if r is not None else roof_for(W, H, rng)
     d = load()
+    if paint == 'only':
+        d = _paintable_data()
     k = '%d,%d' % (W, H)
     if k in d:
         c = rng.choices(d[k], weights=[s['n'] for s in d[k]])[0]
         return [tuple(t) for t in c['t']]
-    # the same width or length, stretched along the ridge from the nearest size that allows it
+    k = k + (':paint' if paint else '')
+    # the same width or length, stretched along the ridge from the nearest size that allows it (the answer
+    # depends only on the size, and checking a stretched roof means drawing it: once per size)
+    if k in _stretched:
+        r = _stretched[k]
+        return list(r) if r is not None else None
+    _stretched[k] = None
     cands = []
     for key, lst in d.items():
         w0, h0 = map(int, key.split(','))
@@ -194,8 +229,21 @@ def roof_for(W, H, rng):
         for c in sorted(lst, key=lambda c: -c['n']):
             r = _stretch(c['t'], w0, h0, W, H)
             if r and coverage(r, W, H) >= 0.97:     # still closed once stretched
-                return [tuple(t) for t in r]
+                _stretched[k] = [tuple(t) for t in r]
+                return list(_stretched[k])
     return None
+
+
+_stretched = {}
+_paint = None
+
+
+def _paintable_data():
+    global _paint
+    if _paint is None:
+        _paint = {k: [c for c in lst if paintable(c['t'])] for k, lst in load().items()}
+        _paint = {k: v for k, v in _paint.items() if v}
+    return _paint
 
 if __name__ == '__main__':
     d = harvest()

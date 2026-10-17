@@ -140,6 +140,12 @@ class Ground:
         """Roads and sidewalks win where a mapped outline reaches over them: vanilla never builds on a
         sidewalk. The squares go back to the street; a building cut in two keeps its biggest piece."""
         over = (self.B > 0) & (self.street | getattr(self, 'sidewalk_band', np.zeros_like(self.street)))
+        # nor on the map's last row or column: a square's south and east walls stand on the next square, which
+        # is outside the map there (the building would be open to the vanilla cells beside it)
+        edge = np.zeros_like(over)
+        edge[-1, :] = edge[:, -1] = True
+        self.edge_trimmed = int(((self.B > 0) & edge).sum())
+        over |= (self.B > 0) & edge
         self.trimmed = int(over.sum())
         if not self.trimmed:
             return
@@ -363,6 +369,23 @@ class Ground:
                 if r['hw'] not in ('service', 'track', 'busway'):
                     self._stroke(ms, r['line'], r['w'], 1)
         self.roads = [r for r in self.roads if not r['area']]
+        # a wide line drawn at an angle comes out with pinholes: single squares of grass inside a sidewalk.
+        # Vanilla paving has none, so a soft square with paving on three or four sides is paved too
+        gm = np.array(self._g, dtype=np.uint8)
+        pave = gm == T_PAVE
+        soft = np.isin(gm, [T_GRASS, T_LAWN, T_DIRT, T_SAND])
+        n = np.zeros(gm.shape, np.int8)
+        n[1:, :] += pave[:-1, :]
+        n[:-1, :] += pave[1:, :]
+        n[:, 1:] += pave[:, :-1]
+        n[:, :-1] += pave[:, 1:]
+        holes = soft & (n >= 3)
+        self.pinholes = int(holes.sum())
+        gm[holes] = T_PAVE
+        self._g = Image.fromarray(gm)
+        vm = np.array(self._v, dtype=np.uint8)
+        vm[holes] = V_NONE
+        self._v = Image.fromarray(vm)
 
     # ------------------------------------------------------------------ point and line objects
     def _points(self):

@@ -161,6 +161,7 @@ def load():
 # ------------------------------------------------------------------------------------------------- fitting
 DIRV = {'N': (0, -1), 'S': (0, 1), 'W': (-1, 0), 'E': (1, 0)}
 ATTACH = {'attachedN': 'N', 'attachedS': 'S', 'attachedW': 'W', 'attachedE': 'E'}
+OPPV = {'N': 'S', 'S': 'N', 'W': 'E', 'E': 'W'}
 TURN = {'N': 'E', 'E': 'S', 'S': 'W', 'W': 'N'}
 MIN_COVER = 0.45
 # vanilla rooms that may furnish a room of another name: the same kind of shop under a chain's name, or a
@@ -279,6 +280,7 @@ class Fitter:
         self.prep = {}
         self.stats = collections.Counter()
         self.recent = collections.defaultdict(lambda: collections.deque(maxlen=6))   # vanilla rooms used lately
+        self._search = {}                                # room shape -> the vanilla rooms that fit it
 
     def _prepare(self, name):
         if name not in self.prep:
@@ -341,12 +343,8 @@ class Fitter:
         return dict(w=w, h=h, cells=frozenset(cells), doors=doors, pieces=pieces, floor=t['floor'], wall=t['wall'], k=k)
 
     @staticmethod
-    def _stretch(t, axis, extra):
-        """Make a template `extra` squares longer along axis 0 (x) or 1 (y) by repeating a plain row: one the
-        same as the row after it, crossed by no piece (an aisle of shelves, a row of tables). -> t or None"""
-        if extra <= 0:
-            return t
-        n = t['w'] if axis == 0 else t['h']
+    def _cut_row(t, axis, n):
+        """The plain row of a template that may be repeated along `axis` (the one nearest the middle), or None."""
         rows = collections.defaultdict(set)
         cells = collections.defaultdict(set)
         for c in t['cells']:
@@ -361,9 +359,22 @@ class Fitter:
         doors_at = {d[axis] for d in t['doors']}
         ok = [r for r in range(1, n - 1) if r not in spans and r - 1 not in spans and cells[r] == cells[r + 1]
               and rows[r] == rows[r + 1] and r not in doors_at]
-        if not ok:
+        return min(ok, key=lambda v: abs(v - n / 2.0)) if ok else None
+
+    @staticmethod
+    def _stretch(t, axis, extra):
+        """Make a template `extra` squares longer along axis 0 (x) or 1 (y) by repeating a plain row: one the
+        same as the row after it, crossed by no piece (an aisle of shelves, a row of tables). -> t or None"""
+        if extra <= 0:
+            return t
+        cut = t.get('_cut')                                # where it can be cut depends only on the template
+        if cut is None:
+            cut = t['_cut'] = {}
+        if axis not in cut:
+            cut[axis] = Fitter._cut_row(t, axis, t['w'] if axis == 0 else t['h'])
+        r = cut[axis]
+        if r is None:
             return None
-        r = min(ok, key=lambda v: abs(v - n / 2.0))
 
         def move(c):
             if c[axis] > r:
@@ -383,16 +394,17 @@ class Fitter:
                 pieces.append((meta, [move((x, y)) + (tt,) for x, y, tt in tiles]))
         doors = [move((x, y)) + (s_, e) for x, y, s_, e in t['doors']]
         out = dict(t)
-        out.update(cells=frozenset(newcells), pieces=pieces, doors=doors,
+        out.update(cells=frozenset(newcells), pieces=pieces, doors=doors, _cut={},
                    w=t['w'] + (extra if axis == 0 else 0), h=t['h'] + (extra if axis == 1 else 0))
         return out
 
-    def fit(self, name, squares, doors, clear=(), windows=(), prefer=(), walls=None):
+    def fit(self, name, squares, doors, clear=(), windows=(), prefer=(), walls=None, edge=None):
         """squares: set of (x, y) of a room; doors: [(x, y, side, exterior)] the room's door squares and the
         side each door is on; windows: squares with a window on one of their sides.
         -> (placements [(x, y, tile)], floor tile, wall family 'sheet:base') or None"""
         self._windows = set(windows)
         self._walls = walls                              # the real room, when fitting into part of it
+        self._edge = edge                                # edge(side, x, y): a real wall, door or window there
         cands = self._prepare(name)
         if prefer:                                       # e.g. an office lobby: the vanilla lobbies with a front desk
             want = [t for t in cands if any(p[0] and self.cat.get(p[1][0][2], {}).get('CustomName') in prefer
@@ -409,80 +421,93 @@ class Fitter:
         D = [(x - X0, y - Y0, s, e) for x, y, s, e in doors]
         main = sorted(D, key=lambda d: -d[3])
         rect = len(C) == CW * CH                            # a plain rectangle: fitting is a bounds check
-        best = None
-        found = []
-        order = list(range(len(cands)))
-        self.rng.shuffle(order)
-        tried = 0
-        for ci in order:
-            t = cands[ci]
-            if t['w'] > CW or t['h'] > CH:
-                continue
-            if len(t['cells']) < MIN_COVER * len(C):       # too small as it is: lengthen its aisles
-                for axis in (0, 1):
-                    room = CW if axis == 0 else CH
-                    have = t['w'] if axis == 0 else t['h']
-                    t2 = self._stretch(t, axis, room - have)
-                    if t2 is not None:
-                        t = t2
-                if len(t['cells']) < MIN_COVER * len(C):
-                    continue
-                self.stats['templates lengthened'] += 1
-            tried += 1
-            for do in main[:2]:
-                for dt in t['doors']:
-                    if dt[2] != do[2]:
-                        continue
-                    off = (do[0] - dt[0], do[1] - dt[1])
-                    if rect:
-                        if off[0] < 0 or off[1] < 0 or off[0] + t['w'] > CW or off[1] + t['h'] > CH:
-                            continue
-                    elif not all((x + off[0], y + off[1]) in C for x, y in t['cells']):
-                        continue
-                    td = {(x + off[0], y + off[1], s) for x, y, s, e in t['doors']}
-                    score = len(t['cells']) / float(len(C)) + (1.0 if dt[3] == do[3] else 0) + \
-                        0.3 * sum(1 for d in D if (d[0], d[1], d[2]) in td)
-                    found.append((score, t, off))
-                    if best is None or score > best[0]:
-                        best = (score, t, off)
-            if tried >= 60 and best:
-                break
-        if best is None:
-            # second try: a template whose door is on the same wall as ours, slid along that wall
-            do = main[0]
-            for ci in order[:150]:
+        # the search depends only on the room's shape, its doors and its kind: an identical room (the same
+        # office on the next floor, the next home of a row) reuses it, and the pick below still varies
+        key = (name, tuple(sorted(prefer)), frozenset(C), tuple(sorted(D)))
+        if key in self._search:
+            found = self._search[key]
+            self.stats['room searches reused'] += 1
+            if not found:
+                self.stats['no template fits'] += 1
+                return None
+        else:
+            best = None
+            found = []
+            order = list(range(len(cands)))
+            self.rng.shuffle(order)
+            tried = 0
+            for ci in order:
                 t = cands[ci]
                 if t['w'] > CW or t['h'] > CH:
                     continue
-                for axis in (0, 1):
+                if len(t['cells']) < MIN_COVER * len(C):       # too small as it is: lengthen its aisles
+                    for axis in (0, 1):
+                        room = CW if axis == 0 else CH
+                        have = t['w'] if axis == 0 else t['h']
+                        t2 = self._stretch(t, axis, room - have)
+                        if t2 is not None:
+                            t = t2
                     if len(t['cells']) < MIN_COVER * len(C):
-                        t2 = self._stretch(t, axis, (CW - t['w']) if axis == 0 else (CH - t['h']))
-                        t = t2 if t2 is not None else t
-                if len(t['cells']) < MIN_COVER * len(C):
-                    continue
-                for dt in t['doors']:
-                    if dt[2] != do[2]:
                         continue
-                    if do[2] in 'NS':                               # only positions with its door on our door's wall
-                        spots = [(ox_, do[1] - dt[1]) for ox_ in range(0, CW - t['w'] + 1)]
-                    else:
-                        spots = [(do[0] - dt[0], oy_) for oy_ in range(0, CH - t['h'] + 1)]
-                    for ox_, oy_ in spots:
-                        if True:
-                            line_ok = 0 <= oy_ <= CH - t['h'] and 0 <= ox_ <= CW - t['w']
-                            if not line_ok or not (rect or all((x + ox_, y + oy_) in C for x, y in t['cells'])):
+                    self.stats['templates lengthened'] += 1
+                tried += 1
+                for do in main[:2]:
+                    for dt in t['doors']:
+                        if dt[2] != do[2]:
+                            continue
+                        off = (do[0] - dt[0], do[1] - dt[1])
+                        if rect:
+                            if off[0] < 0 or off[1] < 0 or off[0] + t['w'] > CW or off[1] + t['h'] > CH:
                                 continue
-                            gap = abs(dt[0] + ox_ - do[0]) + abs(dt[1] + oy_ - do[1])
-                            score = len(t['cells']) / float(len(C)) - 0.05 * gap
-                            found.append((score, t, (ox_, oy_)))
-                            if best is None or score > best[0]:
-                                best = (score, t, (ox_, oy_))
-                if best and best[0] > 0.8:
+                        elif not all((x + off[0], y + off[1]) in C for x, y in t['cells']):
+                            continue
+                        td = {(x + off[0], y + off[1], s) for x, y, s, e in t['doors']}
+                        score = len(t['cells']) / float(len(C)) + (1.0 if dt[3] == do[3] else 0) + \
+                            0.3 * sum(1 for d in D if (d[0], d[1], d[2]) in td)
+                        found.append((score, t, off))
+                        if best is None or score > best[0]:
+                            best = (score, t, off)
+                if tried >= 60 and best:
                     break
             if best is None:
-                self.stats['no template fits'] += 1
-                return None
-            self.stats['templates slid along the door wall'] += 1
+                # second try: a template whose door is on the same wall as ours, slid along that wall
+                do = main[0]
+                for ci in order[:150]:
+                    t = cands[ci]
+                    if t['w'] > CW or t['h'] > CH:
+                        continue
+                    for axis in (0, 1):
+                        if len(t['cells']) < MIN_COVER * len(C):
+                            t2 = self._stretch(t, axis, (CW - t['w']) if axis == 0 else (CH - t['h']))
+                            t = t2 if t2 is not None else t
+                    if len(t['cells']) < MIN_COVER * len(C):
+                        continue
+                    for dt in t['doors']:
+                        if dt[2] != do[2]:
+                            continue
+                        if do[2] in 'NS':                               # only positions with its door on our door's wall
+                            spots = [(ox_, do[1] - dt[1]) for ox_ in range(0, CW - t['w'] + 1)]
+                        else:
+                            spots = [(do[0] - dt[0], oy_) for oy_ in range(0, CH - t['h'] + 1)]
+                        for ox_, oy_ in spots:
+                            if True:
+                                line_ok = 0 <= oy_ <= CH - t['h'] and 0 <= ox_ <= CW - t['w']
+                                if not line_ok or not (rect or all((x + ox_, y + oy_) in C for x, y in t['cells'])):
+                                    continue
+                                gap = abs(dt[0] + ox_ - do[0]) + abs(dt[1] + oy_ - do[1])
+                                score = len(t['cells']) / float(len(C)) - 0.05 * gap
+                                found.append((score, t, (ox_, oy_)))
+                                if best is None or score > best[0]:
+                                    best = (score, t, (ox_, oy_))
+                    if best and best[0] > 0.8:
+                        break
+                if best is None:
+                    self.stats['no template fits'] += 1
+                    self._search[key] = []
+                    return None
+                self.stats['templates slid along the door wall'] += 1
+            if len(self._search) < 50000:
+                self._search[key] = found
         need = self._essentials(name)
         ranked = sorted(found, key=lambda f: -f[0])[:30]
         # a vanilla room used for a room of this kind just now goes last: neighbours are not copies
@@ -537,16 +562,19 @@ class Fitter:
             # a piece vanilla never turns to the wall must not end up facing one here (a stretched room repeats
             # its rows, and with them any odd piece at the end of a row)
             own = set(cells)
+            E = self._edge
             if any(p.get('CustomName') in face_in_kinds() and p.get('Facing') in DIRV and
-                   (cx + DIRV[p['Facing']][0], cy + DIRV[p['Facing']][1]) not in R and
-                   (cx + DIRV[p['Facing']][0], cy + DIRV[p['Facing']][1]) not in own
+                   (cx + DIRV[p['Facing']][0], cy + DIRV[p['Facing']][1]) not in own and
+                   ((cx + DIRV[p['Facing']][0], cy + DIRV[p['Facing']][1]) not in R or
+                    (E is not None and E(p['Facing'], X0 + cx, Y0 + cy)))
                    for (cx, cy), p in zip(cells, props)):
                 self.stats['pieces left out: they would face a wall'] += 1
                 continue
             # a piece vanilla stands against a wall (a back bar, a sink, a fridge) needs a wall behind it
             if any(p.get('CustomName') in back_wall_kinds() and p.get('Facing') in DIRV and
-                   (cx - DIRV[p['Facing']][0], cy - DIRV[p['Facing']][1]) in R and
-                   (cx - DIRV[p['Facing']][0], cy - DIRV[p['Facing']][1]) not in own
+                   (cx - DIRV[p['Facing']][0], cy - DIRV[p['Facing']][1]) not in own and
+                   ((cx - DIRV[p['Facing']][0], cy - DIRV[p['Facing']][1]) in R or
+                    (E is not None and not E(OPPV[p['Facing']], X0 + cx, Y0 + cy)))
                    for (cx, cy), p in zip(cells, props)):
                 self.stats['pieces left out: no wall behind them'] += 1
                 continue
@@ -555,7 +583,8 @@ class Fitter:
                 for a, s in ATTACH.items():
                     if a in p:
                         dx, dy = DIRV[s]
-                        if (cx + dx, cy + dy) in R or any((cx, cy, s) == (d[0], d[1], d[2]) for d in D):
+                        if (cx + dx, cy + dy) in R or any((cx, cy, s) == (d[0], d[1], d[2]) for d in D) or \
+                                (E is not None and not E(s, X0 + cx, Y0 + cy)):
                             hung = False
             if not hung:
                 self.stats['wall pieces with no wall to hang on'] += 1
